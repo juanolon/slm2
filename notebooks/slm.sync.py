@@ -13,6 +13,7 @@
 # ---
 
 # %%
+from dataclasses import dataclass
 from __future__ import annotations
 
 import math
@@ -24,7 +25,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from shape_extensions import Int, IntVar
-from torch import Tensor
+from torch import Tensor, nn
 
 B = IntVar("B")
 L = IntVar("L")
@@ -450,7 +451,7 @@ check_sample_forward()
 # \end{align}$$
 # where $\operatorname{expm1}$ is the numerically stable function $\operatorname{expm1}(x) = \exp(x) - 1$.
 #
-# This is the probability that a wrong category survives the backward transition, conditional on being present now.
+# This is the probability that a wrong category survives the backward transition (when moving from time $t$ back to an earlier time $s$), conditional on being present now.
 
 
 # %%
@@ -789,6 +790,8 @@ check_reverse_probs()
 # $$
 # d(q, p) = q \log q - q \log p + (1 - q) \log (1 - q) - (1 - q) \log (1 - p)
 # $$
+#
+# > The $D_{\mathrm{KL}} = \sum_k d(\psi_k,\widehat\psi_k) $ is the sum of the scalar bernoulli KLs for each token $k$. `bernoulli_kl` return only $d$.
 
 
 # %%
@@ -937,17 +940,463 @@ def check_reconstruction_nll():
 
 check_reconstruction_nll()
 
+# %% [markdown]
+# ## Unified $\ell_{j-1}$ loss (Paper Eq. 7 + $L_0$)
+# Paper Eq. 7 $L_{j-1}$
+# $$
+# L_{j-1} = \mathbb E_{q(c_j\mid x_0)} \left[ D_{\mathrm{KL}} \left( \operatorname{Bern}(\operatorname{gd}(c_j)) \| \operatorname{Bern}(\operatorname{pred}_\theta(c_j)) \right) \right]
+# $$
+# and Eq. $L_0$:
+# $$
+# L_0 = -\mathbb E_{q(c_1\mid x_0)} \left[ \log p_\theta(x_0^c\mid c_1) \right]
+# $$
+# combined in one function
+
+# $$
+# \ell_{j-1}(x_0,c_j) = \begin{cases} -\log p_\theta(x_0\mid c_1),&j=1,\\[2mm] D_{\mathrm{KL}}\left(q\|p_\theta\right),&j>1. \end{cases}
+# $$
+#
+# > $L_{j-1}$ now becomes
+# $$
+# L_{j-1} = \mathbb E_{q(c_j\mid x_0)}[\ell_{j-1}(x_0,c_j)]
+# $$
+
+
 # %%
-def elbo_term(log_probabilities: Tensor[[B, L, K]], clean_tokens: Tensor[[B, L]], candidate_mask: Tensor[[B, L, K]], timestep_indices: Tensor[[B]], T: int) -> Tensor[[B, L]]:
+def elbo_term(
+    log_probabilities: Tensor[[B, L, K]],
+    clean_tokens: Tensor[[B, L]],
+    candidate_mask: Tensor[[B, L, K]],
+    timestep_indices: Tensor[[B]],
+    T: int,
+) -> Tensor[[B, L]]:
+    assert (
+        timestep_indices.dtype == torch.long
+        and ((timestep_indices >= 1) & (timestep_indices <= T)).all()
+    )
+
+    time = timestep_indices.double() / T
+    earlier_time = (timestep_indices - 1).double() / T
+    clean_probs = log_probabilities.double().exp()
+
+    predicted_probs = reverse_probs(clean_probs, candidate_mask, earlier_time, time)
+    posterior_params = posterior_probs(clean_tokens, candidate_mask, earlier_time, time)
+
+    kl_div = bernoulli_kl(posterior_params, predicted_probs).sum(-1)
+    reconstruction = reconstruction_nll(clean_tokens, predicted_probs)
+
+    return torch.where((timestep_indices == 1)[:, None], reconstruction, kl_div)
+
 
 # %%
 def check_elbo_term():
     inputs = torch.tensor([[0], [0]])
     candidate_mask = torch.ones(2, 1, 2, dtype=torch.bool)
     log_probabilities = torch.full((2, 1, 2), -math.log(2.0), dtype=torch.float64)
-    value = elbo_term(log_probabilities, inputs, candidate_mask, torch.tensor([1, 2]), 2)
+    value = elbo_term(
+        log_probabilities, inputs, candidate_mask, torch.tensor([1, 2]), 2
+    )
     assert torch.isfinite(value).all() and (value >= 0).all()
-    torch.testing.assert_close(value[0], torch.tensor([2 * math.log(2.0)], dtype=torch.float64))
+    torch.testing.assert_close(
+        value[0], torch.tensor([2 * math.log(2.0)], dtype=torch.float64)
+    )
     oracle = F.one_hot(inputs, 2).double().log()
-    torch.testing.assert_close(elbo_term(oracle, inputs, candidate_mask, torch.tensor([1, 2]), 2), torch.zeros(2, 1, dtype=torch.float64))
+    torch.testing.assert_close(
+        elbo_term(oracle, inputs, candidate_mask, torch.tensor([1, 2]), 2),
+        torch.zeros(2, 1, dtype=torch.float64),
+    )
+
+
 check_elbo_term()
+
+# %% [markdown]
+# ## Stratified sampling of timesteps
+# Sampling timesteps for a batch uniformly $J \sim \operatorname{Uniform}\{1,\ldots,T\}$ could lead to clustered timesteps. E.g. ($T = 8$ and $B = 4$):
+# $$
+# J = (5, 5, 6, 5)
+# $$
+#
+# Stratified sampling divides the batch into $B$ strata and samples one timestep from each stratum. This guarantees that the timesteps are evenly distributed across the batch.
+#
+# Start with a interval $[0, 1)$, which represents the complete difusion timeline. For a batch of size $B$, divide it into $B$ equal strata:
+# $$
+# \left[\frac{b}{B},\frac{b+1}{B}\right), \qquad b=0,\ldots,B-1.
+# $$
+# For every stratum, sample an independent random value
+# $$
+# V_b\sim\mathcal U[0,1).
+# $$
+# $V_b$ describes the relative position inside the stratum $b$
+# Now we can assign a timestep to each stratum by scaling the relative position $V_b$ to the complete timeline $[0, 1)$:
+# $$
+# U_b = \frac{b + V_b}{B}
+# $$
+# Finally, we convert the continuous value $U_b$ into the discrete diffusion timestep
+# $$
+# J_b = \lfloor TU_b\rfloor + 1
+# $$
+
+
+# %%
+def sample_steps(
+    batch: Int[B], T: int, device="cpu", generator=None, stratified=True
+) -> Tensor[[B]]:
+    assert batch > 0 and T > 0, "batch and T must be positive integers"
+
+    if not stratified:
+        return torch.randint(1, T + 1, (batch,), device=device, generator=generator)
+
+    uniform_samples = (
+        torch.arange(batch, device=device, dtype=torch.float64)
+        + torch.rand(batch, device=device, generator=generator)
+    ) / batch
+    uniform_samples = uniform_samples[
+        torch.randperm(batch, device=device, generator=generator)
+    ]
+
+    return (uniform_samples * T).long().clamp(max=T - 1) + 1
+
+
+# %%
+def check_sample_steps():
+    timestep_indices = sample_steps(
+        1000, 1000, generator=torch.Generator().manual_seed(9)
+    )
+    assert timestep_indices.dtype == torch.long and torch.equal(
+        timestep_indices.sort().values, torch.arange(1, 1001)
+    )
+    assert sample_steps(5, 1).eq(1).all()
+    first_sample = sample_steps(
+        10, 8, generator=torch.Generator().manual_seed(3), stratified=False
+    )
+    second_sample = sample_steps(
+        10, 8, generator=torch.Generator().manual_seed(3), stratified=False
+    )
+    assert torch.equal(first_sample, second_sample)
+
+
+check_sample_steps()
+
+# %% [markdown]
+# ## Simple and Weighted loss (Paper Eq. 10, 11)
+# Since the candidate vector $x^c_0$ is one-hot, if the true token is $k^*$, then
+# $$
+# x_{0,k}^c = \begin{cases} 1,&k=k^\star,\\ 0,&k\neq k^\star. \end{cases}
+# $$
+# Let the model output probabilities be: $\mathbf p_\theta = \operatorname{NN}_\theta(x_t^c,t) = (p_{\theta,1},\ldots,p_{\theta,K})$
+# then,
+# $$
+# \begin{aligned} \left\langle \log\mathbf p_\theta,x_0^c \right\rangle &= \sum_{k=1}^{K} x_{0,k}^c\log p_{\theta,k}\\ &= \log p_{\theta,k^\star}. \end{aligned}
+# $$. Applying the negative sign, we have the negative log-likelihood of the true token:
+# $$
+# \operatorname{CE}(x_0^c,\mathbf p_\theta) = -\log p_{\theta,k^\star}.
+# $$
+
+# ### Weighted loss
+# Normalize time $n(t) = n(\frac{j}{T})$ and $n(t-1) = n(\frac{j-1}{T})$. The weight
+# $$
+# \begin{aligned}
+# \frac{n(t) - n(t-1)}{n(t)-1} &= \frac{n(t) - 1 - n(t-1) + 1}{n(t) - 1} \\
+#         &= \frac{n(t) - 1}{n(t) - 1} - \frac{n(t-1) - 1}{n(t) - 1} \\
+#         &= 1 - \frac{n(t-1) - 1}{n(t) - 1} \\
+#         &= 1 - r(t-1, t)
+# \end{aligned}
+# $$
+# can be calculated using the survival ratio $r(t-1, t)$.
+
+# > Remember that $n(t)=\mathbb E[|C_t|\mid x_0]$ is the expected total number of candidates at time $t$. Because the true token is always included, $n(t)-1$ is the expected number of wrong candidates at time $t$.
+# >
+# > Now,
+# $$
+# 1-r(s,t) = \frac{\text{expected number of wrong candidates removed}} {\text{expected number of wrong candidates currently present}}
+# $$
+# >
+# > $1-r(s,t)$ is the fraction of the currently present wrong
+# > candidates that the schedule expects to remove during the reverse
+# > transition from time $t$ to time $s$.
+#
+# TODO check this
+# The weighted loss gives more weight to clean-token prediction errors at
+# reverse steps that are scheduled to remove a larger fraction of the
+# currently present wrong candidates. The weight is determined by the
+# schedule, not by how many candidates the model actually removes.
+
+
+# %%
+def training_loss(
+    log_probabilities: Tensor[[B, L, K]],
+    clean_tokens: Tensor[[B, L]],
+    timestep_indices: Tensor[[B]],
+    T: int,
+    objective: str,
+) -> Tensor[[B, L]]:
+    cross_entropy = -log_probabilities.gather(-1, clean_tokens[..., None]).squeeze(-1)
+
+    if objective == "simple":
+        return T * cross_entropy
+    elif objective == "weighted":
+        time = timestep_indices.double() / T
+        earlier_time = (timestep_indices.double() - 1) / T
+        step_weights = 1 - survival_ratio(
+            earlier_time, time, log_probabilities.shape[-1]
+        ).to(cross_entropy.dtype)
+
+        return T * step_weights[:, None] * cross_entropy
+    else:
+        raise ValueError(f"objective must be 'simple' or 'weighted', got {objective}")
+
+
+# %%
+def check_training_loss():
+    log_probabilities = torch.full(
+        (2, 1, 4), -math.log(4.0), dtype=torch.float64, requires_grad=True
+    )
+    inputs = torch.zeros(2, 1, dtype=torch.long)
+    timestep_indices = torch.tensor([1, 2])
+    simple = training_loss(log_probabilities, inputs, timestep_indices, 2, "simple")
+    weighted = training_loss(log_probabilities, inputs, timestep_indices, 2, "weighted")
+    torch.testing.assert_close(
+        simple, torch.full((2, 1), 2 * math.log(4.0), dtype=torch.float64)
+    )
+    torch.testing.assert_close(
+        weighted[:, 0],
+        torch.tensor([2 * math.log(4.0), 4 / 3 * math.log(4.0)], dtype=torch.float64),
+    )
+    weighted.mean().backward()
+    assert torch.isfinite(log_probabilities.grad).all()
+
+
+check_training_loss()
+
+# %% [markdown]
+# # Backbone
+
+
+# %%
+class LayerNorm(nn.Module):
+    def __init__(self, dim: int):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(dim))
+        self.dim = dim
+
+    def forward(self, inputs):
+        return F.layer_norm(inputs.float(), [self.dim]) * self.weight[None, None, :]
+
+
+class TimestepEmbedder(nn.Module):
+    def __init__(self, hidden_size, frequency_embedding_size=256):
+        super().__init__()
+        self.frequency_embedding_size = frequency_embedding_size
+        self.mlp = nn.Sequential(
+            nn.Linear(frequency_embedding_size, hidden_size),
+            nn.SiLU(),
+            nn.Linear(hidden_size, hidden_size),
+        )
+
+    def forward(self, time):
+        half = self.frequency_embedding_size // 2
+        freq = torch.exp(
+            -math.log(10000) * torch.arange(half, device=time.device).float() / half
+        )
+        angles = time.float()[:, None] * freq[None, :]
+        return self.mlp(torch.cat([angles.cos(), angles.sin()], dim=-1))
+
+
+class Rotary(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        assert dim % 2 == 0
+        self.register_buffer(
+            "inv_freq", 1 / 10000 ** (torch.arange(0, dim, 2).float() / dim)
+        )
+
+    def forward(self, queries, keys):
+        pos = torch.arange(queries.shape[-2], device=queries.device).float()
+        angles = pos[:, None] * self.inv_freq[None, :]
+        angles = torch.cat([angles, angles], dim=-1)[None, None, :, :]
+        cos, sin = (angles.cos().to(queries.dtype), angles.sin().to(queries.dtype))
+
+        def rotate(inputs):
+            left, right = inputs.chunk(2, dim=-1)
+            return inputs * cos + torch.cat([-right, left], dim=-1) * sin
+
+        return (rotate(queries), rotate(keys))
+
+
+class DDiTBlock(nn.Module):
+    def __init__(self, dim, n_heads, cond_dim, dropout):
+        super().__init__()
+        self.n_heads = n_heads
+        self.norm1 = LayerNorm(dim)
+        self.attn_qkv = nn.Linear(dim, 3 * dim, bias=False)
+        self.attn_out = nn.Linear(dim, dim, bias=False)
+        self.norm2 = LayerNorm(dim)
+        self.mlp = nn.Sequential(
+            nn.Linear(dim, 4 * dim),
+            nn.GELU(approximate="tanh"),
+            nn.Linear(4 * dim, dim),
+        )
+        self.adaLN_modulation = nn.Linear(cond_dim, 6 * dim)
+        nn.init.zeros_(self.adaLN_modulation.weight)
+        nn.init.zeros_(self.adaLN_modulation.bias)
+        self.dropout = dropout
+
+    def forward(self, residual_states, condition, rotary):
+        shift_a, scale_a, gate_a, shift_m, scale_m, gate_m = self.adaLN_modulation(
+            condition
+        )[:, None, :].chunk(6, dim=-1)
+        branch_states = self.norm1(residual_states) * (1 + scale_a) + shift_a
+        batch_size, sequence_length, hidden_size = branch_states.shape
+        qkv = (
+            self.attn_qkv(branch_states)
+            .reshape(
+                batch_size,
+                sequence_length,
+                3,
+                self.n_heads,
+                hidden_size // self.n_heads,
+            )
+            .permute(2, 0, 3, 1, 4)
+        )
+        queries, keys, values = qkv.unbind(0)
+        queries, keys = rotary(queries, keys)
+        branch_states = F.scaled_dot_product_attention(
+            queries, keys, values, dropout_p=0.0, is_causal=False
+        )
+        branch_states = branch_states.transpose(1, 2).reshape(
+            batch_size, sequence_length, hidden_size
+        )
+        residual_states = residual_states + gate_a * F.dropout(
+            self.attn_out(branch_states), p=self.dropout, training=self.training
+        )
+        branch_states = self.norm2(residual_states) * (1 + scale_m) + shift_m
+        return residual_states + gate_m * F.dropout(
+            self.mlp(branch_states), p=self.dropout, training=self.training
+        )
+
+
+class DDitFinalLayer(nn.Module):
+    def __init__(self, hidden, vocabulary_size, cond):
+        super().__init__()
+        self.norm_final = LayerNorm(hidden)
+        self.linear = nn.Linear(hidden, vocabulary_size)
+        self.adaLN_modulation = nn.Linear(cond, 2 * hidden)
+        for layer in (self.linear, self.adaLN_modulation):
+            nn.init.zeros_(layer.weight)
+            nn.init.zeros_(layer.bias)
+
+    def forward(self, hidden_states, conditioning):
+        shift, scale = self.adaLN_modulation(conditioning)[:, None, :].chunk(2, dim=-1)
+        return self.linear(self.norm_final(hidden_states) * (1 + scale) + shift)
+
+
+class BFN_DIT(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        assert (
+            config.hidden % config.heads == 0 and config.hidden // config.heads % 2 == 0
+        )
+        self.prob_adapter = nn.Linear(config.vocab, config.hidden, bias=False)
+        nn.init.kaiming_uniform_(self.prob_adapter.weight, a=math.sqrt(5))
+        self.sigma_map = TimestepEmbedder(config.cond)
+        self.rotary_emb = Rotary(config.hidden // config.heads)
+        self.blocks = nn.ModuleList(
+            [
+                DDiTBlock(config.hidden, config.heads, config.cond, config.dropout)
+                for _ in range(config.blocks)
+            ]
+        )
+        self.output_layer = DDitFinalLayer(config.hidden, config.vocab, config.cond)
+
+    def forward(
+        self, centroids: Tensor[[B, L, K]], time: Tensor[[B]]
+    ) -> Tensor[[B, L, K]]:
+        assert centroids.ndim == 3 and time.shape == (centroids.shape[0],)
+        hidden_states = self.prob_adapter(centroids)
+        conditioning = F.silu(self.sigma_map(time))
+        for block in self.blocks:
+            hidden_states = block(hidden_states, conditioning, self.rotary_emb)
+        output = self.output_layer(hidden_states, conditioning)
+        assert output.shape == centroids.shape
+        return output
+
+# %%
+@dataclass(frozen=True)
+class Config:
+    vocab: int = 4
+    length: int = 12
+    T: int = 8
+    hidden: int = 32
+    heads: int = 4
+    blocks: int = 2
+    cond: int = 16
+    dropout: float = 0.0
+    global_batch: int = 8
+    microbatch: int = 4
+    lr: float = 0.0005
+    betas: tuple = (0.9, 0.999)
+    eps: float = 1e-08
+    weight_decay: float = 0.0
+    warmup: int = 1
+    max_steps: int = 80
+    ema: float = 0.9
+    clip: float = 1.0
+    seed: int = 1
+    objective: str = 'weighted'
+    validate_every: int = 20
+    validation_windows: int = 4096
+    validation_draws: int = 1
+    amp: bool = False
+
+def check_backbone():
+    TOY = Config()
+    model = BFN_DIT(TOY)
+    centroids = torch.full((2, TOY.length, TOY.vocab), 1 / TOY.vocab)
+    output = model(centroids, torch.tensor([0.2, 0.8]))
+    check_shape(output, 2, TOY.length, TOY.vocab)
+    assert output.eq(0).all()
+    F.cross_entropy(
+        output.reshape(-1, TOY.vocab), torch.zeros(2 * TOY.length, dtype=torch.long)
+    ).backward()
+    assert model.output_layer.linear.weight.grad.abs().sum() > 0
+    assert all(
+        torch.isfinite(predicted_probs.grad).all()
+        for predicted_probs in model.parameters()
+        if predicted_probs.grad is not None
+    )
+
+
+check_backbone()
+
+# %% [markdown]
+# ## Predicting log probabilities
+# The model gets a binary candidate mask, which is converted to a centroid representation.
+# The output is masked such that tokens not included in $c_t$ can be reintroduced.
+
+
+# %%
+def predict_log_probs(
+    model, candidate_mask: Tensor[[B, L, K]], time: Tensor[[B]]
+) -> Tensor[[B, L, K]]:
+    logits = model(centroid(candidate_mask), time)
+    if logits.dtype != torch.float64:
+        logits = logits.double()
+
+    return masked_log_probs(logits, candidate_mask)
+
+
+# %%
+def check_predict_log_probs():
+    TOY = Config()
+    model = BFN_DIT(TOY)
+    candidate_mask = torch.ones(2, 3, 4, dtype=torch.bool)
+    candidate_mask[:, :, 3] = False
+    log_probabilities = predict_log_probs(model, candidate_mask, torch.ones(2))
+    check_simplex(log_probabilities.exp())
+    assert log_probabilities.exp()[:, :, 3].eq(0).all()
+    torch.testing.assert_close(
+        log_probabilities.exp()[:, :, :3], torch.full((2, 3, 3), 1 / 3)
+    )
+
+
+check_predict_log_probs()
