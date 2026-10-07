@@ -2,18 +2,18 @@ version = 1
 revision = 3
 requires-python = ">=3.12"
 resolution-markers = [
-    "python_full_version >= '3.14' and extra != 'extra-3-slm-cpu' and extra == 'extra-3-slm-gpu'",
-    "python_full_version < '3.14' and extra != 'extra-3-slm-cpu' and extra == 'extra-3-slm-gpu'",
-    "python_full_version >= '3.14' and sys_platform != 'darwin' and extra == 'extra-3-slm-cpu' and extra != 'extra-3-slm-gpu'",
-    "python_full_version < '3.14' and sys_platform != 'darwin' and extra == 'extra-3-slm-cpu' and extra != 'extra-3-slm-gpu'",
-    "python_full_version >= '3.14' and sys_platform == 'darwin' and extra == 'extra-3-slm-cpu' and extra != 'extra-3-slm-gpu'",
-    "python_full_version < '3.14' and sys_platform == 'darwin' and extra == 'extra-3-slm-cpu' and extra != 'extra-3-slm-gpu'",
-    "python_full_version >= '3.14' and extra != 'extra-3-slm-cpu' and extra != 'extra-3-slm-gpu'",
-    "python_full_version < '3.14' and extra != 'extra-3-slm-cpu' and extra != 'extra-3-slm-gpu'",
+    "python_full_version >= '3.14' and extra != 'extra-4-slm2-cpu' and extra == 'extra-4-slm2-gpu'",
+    "python_full_version < '3.14' and extra != 'extra-4-slm2-cpu' and extra == 'extra-4-slm2-gpu'",
+    "python_full_version >= '3.14' and sys_platform != 'darwin' and extra == 'extra-4-slm2-cpu' and extra != 'extra-4-slm2-gpu'",
+    "python_full_version < '3.14' and sys_platform != 'darwin' and extra == 'extra-4-slm2-cpu' and extra != 'extra-4-slm2-gpu'",
+    "python_full_version >= '3.14' and sys_platform == 'darwin' and extra == 'extra-4-slm2-cpu' and extra != 'extra-4-slm2-gpu'",
+    "python_full_version < '3.14' and sys_platform == 'darwin' and extra == 'extra-4-slm2-cpu' and extra != 'extra-4-slm2-gpu'",
+    "python_full_version >= '3.14' and extra != 'extra-4-slm2-cpu' and extra != 'extra-4-slm2-gpu'",
+    "python_full_version < '3.14' and extra != 'extra-4-slm2-cpu' and extra != 'extra-4-slm2-gpu'",
 ]
 conflicts = [[
-    { package = "slm", extra = "cpu" },
-    { package = "slm", extra = "gpu" },
+    { package = "slm2", extra = "cpu" },
+    { package = "slm2", extra = "gpu" },
 ]]
 
 [[package]]
@@ -36,7 +36,7 @@ dependencies = [
     { name = "frozenlist" },
     { name = "multidict" },
     { name = "propcache" },
-    { name = "typing-extensions", marker = "python_full_version < '3.13' or (extra == 'extra-3-slm-cpu' and extra == 'extra-3-slm-gpu')" },
+    { name = "typing-extensions", marker = "python_full_version < '3.13' or (extra == 'extra-4-slm2-cpu' and extra == 'extra-4-slm2-gpu')" },
     { name = "yarl" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/58/d9/22ce5786ac0c1653ae8b6c23bded02c1686d11f0dbb45b31ce128e0df985/aiohttp-3.14.3.tar.gz", hash = "sha256:9491196535a88924a60afd5b5f434b5b203b6cc616250878dbdb223a8f7844bc", size = 7971213, upload-time = "2026-07-23T01:57:27.037Z" }
@@ -131,7 +131,7 @@ version = "1.4.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "frozenlist" },
-    { name = "typing-extensions", marker = "python_full_version < '3.13' or (extra == 'extra-3-slm-cpu' and extra == 'extra-3-slm-gpu')" },
+    { name = "typing-extensions", marker = "python_full_version < '3.13' or (extra == 'extra-4-slm2-cpu' and extra == 'extra-4-slm2-gpu')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/61/62/06741b579156360248d1ec624842ad0edf697050bbaf7c3e46394e106ad1/aiosignal-1.4.0.tar.gz", hash = "sha256:f47eecd9468083c2029cc99945502cb7708b082c232f9aca65da147157b251c7", size = 25007, upload-time = "2025-07-03T22:54:43.528Z" }
 wheels = [
@@ -144,7 +144,7 @@ version = "4.15.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "idna" },
-    { name = "typing-extensions", marker = "python_full_version < '3.15' or (extra == 'extra-3-slm-cpu' and extra == 'extra-3-slm-gpu')" },
+    { name = "typing-extensions", marker = "python_full_version < '3.15' or (extra == 'extra-4-slm2-cpu' and extra == 'extra-4-slm2-gpu')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/a9/d2/f4d173e22df740bc37b1db102b386ba719b66e95b0f0d751f556b387e6d2/anyio-4.15.1.tar.gz", hash = "sha256:9f28306018cbd6d329e64a36d58256edff76dd996fe423bc957326e578b82a94", size = 276966, upload-time = "2026-09-05T10:42:39.44Z" }
 wheels = [
@@ -308,7 +308,7 @@ name = "cffi"
 version = "2.1.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "pycparser", marker = "implementation_name != 'PyPy' or (extra == 'extra-3-slm-cpu' and extra == 'extra-3-slm-gpu')" },
+    { name = "pycparser", marker = "implementation_name != 'PyPy' or (extra == 'extra-4-slm2-cpu' and extra == 'extra-4-slm2-gpu')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/9e/ef/008a1939e372c06329a3fce4279c02f328488f3526744906eeec3da7ad5f/cffi-2.1.1.tar.gz", hash = "sha256:dd31f52ea1086513bb9df30f8fcee9b8918323ae067a3d5b78bc826a000712be", size = 530807, upload-time = "2026-08-03T21:21:18.939Z" }
 wheels = [
@@ -839,7 +839,7 @@ name = "ipykernel"
 version = "7.3.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "appnope", marker = "sys_platform == 'darwin' or (extra == 'extra-3-slm-cpu' and extra == 'extra-3-slm-gpu')" },
+    { name = "appnope", marker = "sys_platform == 'darwin' or (extra == 'extra-4-slm2-cpu' and extra == 'extra-4-slm2-gpu')" },
     { name = "comm" },
     { name = "debugpy" },
     { name = "ipython" },
@@ -863,13 +863,13 @@ name = "ipython"
 version = "9.17.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'extra-3-slm-cpu' and extra == 'extra-3-slm-gpu')" },
+    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'extra-4-slm2-cpu' and extra == 'extra-4-slm2-gpu')" },
     { name = "ipython-pygments-lexers" },
     { name = "jedi" },
     { name = "matplotlib-inline" },
-    { name = "pexpect", marker = "(sys_platform != 'emscripten' and sys_platform != 'win32') or (sys_platform == 'emscripten' and extra == 'extra-3-slm-cpu' and extra == 'extra-3-slm-gpu') or (sys_platform == 'win32' and extra == 'extra-3-slm-cpu' and extra == 'extra-3-slm-gpu')" },
+    { name = "pexpect", marker = "(sys_platform != 'emscripten' and sys_platform != 'win32') or (sys_platform == 'emscripten' and extra == 'extra-4-slm2-cpu' and extra == 'extra-4-slm2-gpu') or (sys_platform == 'win32' and extra == 'extra-4-slm2-cpu' and extra == 'extra-4-slm2-gpu')" },
     { name = "prompt-toolkit" },
-    { name = "psutil", marker = "(sys_platform != 'cygwin' and sys_platform != 'emscripten') or (sys_platform == 'cygwin' and extra == 'extra-3-slm-cpu' and extra == 'extra-3-slm-gpu') or (sys_platform == 'emscripten' and extra == 'extra-3-slm-cpu' and extra == 'extra-3-slm-gpu')" },
+    { name = "psutil", marker = "(sys_platform != 'cygwin' and sys_platform != 'emscripten') or (sys_platform == 'cygwin' and extra == 'extra-4-slm2-cpu' and extra == 'extra-4-slm2-gpu') or (sys_platform == 'emscripten' and extra == 'extra-4-slm2-cpu' and extra == 'extra-4-slm2-gpu')" },
     { name = "pygments" },
     { name = "stack-data" },
     { name = "traitlets" },
@@ -1155,7 +1155,7 @@ dependencies = [
     { name = "nbformat" },
     { name = "packaging" },
     { name = "prometheus-client" },
-    { name = "pywinpty", marker = "(os_name == 'nt' and sys_platform != 'darwin') or (os_name == 'nt' and extra != 'extra-3-slm-cpu') or (os_name != 'nt' and extra == 'extra-3-slm-cpu' and extra == 'extra-3-slm-gpu') or (sys_platform == 'darwin' and extra == 'extra-3-slm-cpu' and extra == 'extra-3-slm-gpu')" },
+    { name = "pywinpty", marker = "(os_name == 'nt' and sys_platform != 'darwin') or (os_name == 'nt' and extra != 'extra-4-slm2-cpu') or (os_name != 'nt' and extra == 'extra-4-slm2-cpu' and extra == 'extra-4-slm2-gpu') or (sys_platform == 'darwin' and extra == 'extra-4-slm2-cpu' and extra == 'extra-4-slm2-gpu')" },
     { name = "pyzmq" },
     { name = "send2trash" },
     { name = "terminado" },
@@ -1173,7 +1173,7 @@ name = "jupyter-server-terminals"
 version = "0.5.4"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "pywinpty", marker = "(os_name == 'nt' and sys_platform != 'darwin') or (os_name == 'nt' and extra != 'extra-3-slm-cpu') or (os_name != 'nt' and extra == 'extra-3-slm-cpu' and extra == 'extra-3-slm-gpu') or (sys_platform == 'darwin' and extra == 'extra-3-slm-cpu' and extra == 'extra-3-slm-gpu')" },
+    { name = "pywinpty", marker = "(os_name == 'nt' and sys_platform != 'darwin') or (os_name == 'nt' and extra != 'extra-4-slm2-cpu') or (os_name != 'nt' and extra == 'extra-4-slm2-cpu' and extra == 'extra-4-slm2-gpu') or (sys_platform == 'darwin' and extra == 'extra-4-slm2-cpu' and extra == 'extra-4-slm2-gpu')" },
     { name = "terminado" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/f4/a7/bcd0a9b0cbba88986fe944aaaf91bfda603e5a50bda8ed15123f381a3b2f/jupyter_server_terminals-0.5.4.tar.gz", hash = "sha256:bbda128ed41d0be9020349f9f1f2a4ab9952a73ed5f5ac9f1419794761fb87f5", size = 31770, upload-time = "2026-01-14T16:53:20.213Z" }
@@ -1348,8 +1348,8 @@ name = "loguru"
 version = "0.7.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'extra-3-slm-cpu' and extra == 'extra-3-slm-gpu')" },
-    { name = "win32-setctime", marker = "sys_platform == 'win32' or (extra == 'extra-3-slm-cpu' and extra == 'extra-3-slm-gpu')" },
+    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'extra-4-slm2-cpu' and extra == 'extra-4-slm2-gpu')" },
+    { name = "win32-setctime", marker = "sys_platform == 'win32' or (extra == 'extra-4-slm2-cpu' and extra == 'extra-4-slm2-gpu')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/3a/05/a1dae3dffd1116099471c643b8924f5aa6524411dc6c63fdae648c4f1aca/loguru-0.7.3.tar.gz", hash = "sha256:19480589e77d47b8d85b2c827ad95d49bf31b0dcde16593892eb51dd18706eb6", size = 63559, upload-time = "2024-12-06T11:20:56.608Z" }
 wheels = [
@@ -2429,7 +2429,7 @@ name = "pyzmq"
 version = "27.2.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "cffi", marker = "implementation_name == 'pypy' or (extra == 'extra-3-slm-cpu' and extra == 'extra-3-slm-gpu')" },
+    { name = "cffi", marker = "implementation_name == 'pypy' or (extra == 'extra-4-slm2-cpu' and extra == 'extra-4-slm2-gpu')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/e7/8d/5b3d5631c2f4b4b8862f64cd0c9eb777b5710eeb5125b4be8dd0a200a4c0/pyzmq-27.2.0.tar.gz", hash = "sha256:54d4259d1bfae24ecdb5ca79f7acc2eac6c286a02d6a0ae617797cb45f0726d3", size = 292316, upload-time = "2026-08-20T19:08:21.19Z" }
 wheels = [
@@ -2569,7 +2569,7 @@ source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "attrs" },
     { name = "rpds-py" },
-    { name = "typing-extensions", marker = "python_full_version < '3.13' or (extra == 'extra-3-slm-cpu' and extra == 'extra-3-slm-gpu')" },
+    { name = "typing-extensions", marker = "python_full_version < '3.13' or (extra == 'extra-4-slm2-cpu' and extra == 'extra-4-slm2-gpu')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/22/f5/df4e9027acead3ecc63e50fe1e36aca1523e1719559c499951bb4b53188f/referencing-0.37.0.tar.gz", hash = "sha256:44aefc3142c5b842538163acb373e24cce6632bd54bdb01b21ad5863489f50d8", size = 78036, upload-time = "2025-10-13T15:30:48.871Z" }
 wheels = [
@@ -2748,7 +2748,7 @@ wheels = [
 ]
 
 [[package]]
-name = "slm"
+name = "slm2"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
@@ -2758,10 +2758,10 @@ dependencies = [
 
 [package.optional-dependencies]
 cpu = [
-    { name = "torch", version = "2.14.0", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "(sys_platform == 'darwin' and extra == 'extra-3-slm-cpu') or (extra == 'extra-3-slm-cpu' and extra == 'extra-3-slm-gpu')" },
-    { name = "torch", version = "2.14.0+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "(sys_platform != 'darwin' and extra == 'extra-3-slm-cpu') or (extra == 'extra-3-slm-cpu' and extra == 'extra-3-slm-gpu')" },
-    { name = "torchvision", version = "0.29.0", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "(sys_platform == 'darwin' and extra == 'extra-3-slm-cpu') or (extra == 'extra-3-slm-cpu' and extra == 'extra-3-slm-gpu')" },
-    { name = "torchvision", version = "0.29.0+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "(sys_platform != 'darwin' and extra == 'extra-3-slm-cpu') or (extra == 'extra-3-slm-cpu' and extra == 'extra-3-slm-gpu')" },
+    { name = "torch", version = "2.14.0", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "(sys_platform == 'darwin' and extra == 'extra-4-slm2-cpu') or (extra == 'extra-4-slm2-cpu' and extra == 'extra-4-slm2-gpu')" },
+    { name = "torch", version = "2.14.0+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "(sys_platform != 'darwin' and extra == 'extra-4-slm2-cpu') or (extra == 'extra-4-slm2-cpu' and extra == 'extra-4-slm2-gpu')" },
+    { name = "torchvision", version = "0.29.0", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "(sys_platform == 'darwin' and extra == 'extra-4-slm2-cpu') or (extra == 'extra-4-slm2-cpu' and extra == 'extra-4-slm2-gpu')" },
+    { name = "torchvision", version = "0.29.0+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "(sys_platform != 'darwin' and extra == 'extra-4-slm2-cpu') or (extra == 'extra-4-slm2-cpu' and extra == 'extra-4-slm2-gpu')" },
 ]
 gpu = [
     { name = "torch", version = "2.14.0+cu130", source = { registry = "https://download.pytorch.org/whl/cu130" } },
@@ -2779,10 +2779,10 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "numpy", specifier = ">=2.5.3" },
-    { name = "torch", marker = "extra == 'cpu'", specifier = ">=2.13", index = "https://download.pytorch.org/whl/cpu", conflict = { package = "slm", extra = "cpu" } },
-    { name = "torch", marker = "extra == 'gpu'", specifier = ">=2.13", index = "https://download.pytorch.org/whl/cu130", conflict = { package = "slm", extra = "gpu" } },
-    { name = "torchvision", marker = "extra == 'cpu'", specifier = ">=0.28", index = "https://download.pytorch.org/whl/cpu", conflict = { package = "slm", extra = "cpu" } },
-    { name = "torchvision", marker = "extra == 'gpu'", specifier = ">=0.28", index = "https://download.pytorch.org/whl/cu130", conflict = { package = "slm", extra = "gpu" } },
+    { name = "torch", marker = "extra == 'cpu'", specifier = ">=2.13", index = "https://download.pytorch.org/whl/cpu", conflict = { package = "slm2", extra = "cpu" } },
+    { name = "torch", marker = "extra == 'gpu'", specifier = ">=2.13", index = "https://download.pytorch.org/whl/cu130", conflict = { package = "slm2", extra = "gpu" } },
+    { name = "torchvision", marker = "extra == 'cpu'", specifier = ">=0.28", index = "https://download.pytorch.org/whl/cpu", conflict = { package = "slm2", extra = "cpu" } },
+    { name = "torchvision", marker = "extra == 'gpu'", specifier = ">=0.28", index = "https://download.pytorch.org/whl/cu130", conflict = { package = "slm2", extra = "gpu" } },
     { name = "tqdm", specifier = ">=4.70.1" },
 ]
 provides-extras = ["cpu", "gpu"]
@@ -2835,8 +2835,8 @@ name = "terminado"
 version = "0.18.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "ptyprocess", marker = "os_name != 'nt' or (extra == 'extra-3-slm-cpu' and extra == 'extra-3-slm-gpu')" },
-    { name = "pywinpty", marker = "(os_name == 'nt' and sys_platform != 'darwin') or (os_name == 'nt' and extra != 'extra-3-slm-cpu') or (os_name != 'nt' and extra == 'extra-3-slm-cpu' and extra == 'extra-3-slm-gpu') or (sys_platform == 'darwin' and extra == 'extra-3-slm-cpu' and extra == 'extra-3-slm-gpu')" },
+    { name = "ptyprocess", marker = "os_name != 'nt' or (extra == 'extra-4-slm2-cpu' and extra == 'extra-4-slm2-gpu')" },
+    { name = "pywinpty", marker = "(os_name == 'nt' and sys_platform != 'darwin') or (os_name == 'nt' and extra != 'extra-4-slm2-cpu') or (os_name != 'nt' and extra == 'extra-4-slm2-cpu' and extra == 'extra-4-slm2-gpu') or (sys_platform == 'darwin' and extra == 'extra-4-slm2-cpu' and extra == 'extra-4-slm2-gpu')" },
     { name = "tornado" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/8a/11/965c6fd8e5cc254f1fe142d547387da17a8ebfd75a3455f637c663fb38a0/terminado-0.18.1.tar.gz", hash = "sha256:de09f2c4b85de4765f7714688fff57d3e75bad1f909b589fde880460c753fd2e", size = 32701, upload-time = "2024-03-12T14:34:39.026Z" }
@@ -2936,7 +2936,7 @@ resolution-markers = [
 ]
 dependencies = [
     { name = "cuda-bindings", marker = "python_full_version < '3.15' and sys_platform == 'linux'" },
-    { name = "cuda-toolkit", extra = ["cublas", "cudart", "cufft", "cufile", "cupti", "curand", "cusolver", "cusparse", "nvjitlink", "nvrtc", "nvtx"], marker = "(sys_platform == 'linux' and extra == 'extra-3-slm-gpu') or (extra == 'extra-3-slm-cpu' and extra == 'extra-3-slm-gpu')" },
+    { name = "cuda-toolkit", extra = ["cublas", "cudart", "cufft", "cufile", "cupti", "curand", "cusolver", "cusparse", "nvjitlink", "nvrtc", "nvtx"], marker = "(sys_platform == 'linux' and extra == 'extra-4-slm2-gpu') or (extra == 'extra-4-slm2-cpu' and extra == 'extra-4-slm2-gpu')" },
     { name = "filelock" },
     { name = "fsspec" },
     { name = "jinja2" },
@@ -3083,7 +3083,7 @@ name = "tqdm"
 version = "4.70.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'extra-3-slm-cpu' and extra == 'extra-3-slm-gpu')" },
+    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'extra-4-slm2-cpu' and extra == 'extra-4-slm2-gpu')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/0d/ea/b2a5bd54b28a324dae8211928b2d730b6547500342c7e6c6dea08bd0a485/tqdm-4.70.1.tar.gz", hash = "sha256:cefd0eca11b2a37a3aee776544d4f4ae913f02688135b5556b8788dfa474afc4", size = 171846, upload-time = "2026-09-11T07:25:16.601Z" }
 wheels = [
