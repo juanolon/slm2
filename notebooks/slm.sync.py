@@ -42,23 +42,23 @@ def seed_all(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
-def check_shape(inputs, *shape):
+def assert_shape(inputs, *shape):
     assert isinstance(inputs, torch.Tensor)
     assert tuple(inputs.shape) == tuple(shape), (tuple(inputs.shape), shape)
 
 
-def check_probabilities(predicted_probs):
+def assert_probabilities(predicted_probs):
     assert torch.isfinite(predicted_probs).all(), "NaN/inf probability"
     assert ((predicted_probs >= 0) & (predicted_probs <= 1)).all(), "outside [0,1]"
 
 
-def check_candidates(candidate_mask):
+def assert_candidates(candidate_mask):
     assert candidate_mask.dtype == torch.bool and candidate_mask.ndim == 3
     assert candidate_mask.any(-1).all(), "empty candidate set"
 
 
-def check_simplex(predicted_probs, atol=1e-06):
-    check_probabilities(predicted_probs)
+def assert_simplex(predicted_probs, atol=1e-06):
+    assert_probabilities(predicted_probs)
     torch.testing.assert_close(
         predicted_probs.sum(-1),
         torch.ones_like(predicted_probs.sum(-1)),
@@ -189,7 +189,7 @@ def check_gather_windows():
     got = gather_windows(torch.arange(8, dtype=torch.uint8), torch.tensor([0, 5]), 3)
     assert got.dtype == torch.long
     assert got.tolist() == [[0, 1, 2], [5, 6, 7]]
-    check_shape(got, 2, 3)
+    assert_shape(got, 2, 3)
 
 
 check_gather_windows()
@@ -243,7 +243,7 @@ check_expected_count()
 
 # %%
 def centroid(candidate_mask: Tensor[[B, L, K]]) -> Tensor[[B, L, K]]:
-    check_candidates(candidate_mask)
+    assert_candidates(candidate_mask)
     c_sum = candidate_mask.sum(-1, keepdim=True)
 
     return candidate_mask.float() / c_sum
@@ -256,7 +256,7 @@ def check_centroid():
     torch.testing.assert_close(
         centroids, torch.tensor([[[0.5, 0.0, 0.5], [0.0, 1.0, 0.0]]])
     )
-    check_simplex(centroids)
+    assert_simplex(centroids)
     if TYPE_CHECKING:
         example = torch.ones(2, 3, 4, dtype=torch.bool)
         assert_type(centroid(example), Tensor[[2, 3, 4]])
@@ -376,7 +376,7 @@ def check_marginal_probs():
     torch.testing.assert_close(
         predicted_probs, torch.tensor([[[1 / 3, 1 / 3, 1.0, 1 / 3]]])
     )
-    check_probabilities(predicted_probs)
+    assert_probabilities(predicted_probs)
 
 
 check_marginal_probs()
@@ -426,7 +426,7 @@ def check_sample_forward():
     inputs = torch.zeros(12000, 1, dtype=torch.long)
     generator = torch.Generator().manual_seed(2026)
     candidate_mask = sample_forward(inputs, torch.full((12000,), 0.5), 4, generator)
-    check_candidates(candidate_mask)
+    assert_candidates(candidate_mask)
     assert candidate_mask[:, :, 0].all()
     assert abs(candidate_mask.float().sum(-1).mean().item() - 2) < 0.04
     first_wrong_included, second_wrong_included = (
@@ -505,7 +505,7 @@ def posterior_probs(
     earlier_time: Tensor[[B]],
     time: Tensor[[B]],
 ) -> Tensor[[B, L, K]]:
-    check_candidates(candidate_mask)
+    assert_candidates(candidate_mask)
     assert candidate_mask.gather(-1, clean_tokens[..., None]).all(), (
         "clean token must be in candidate set"
     )
@@ -691,7 +691,7 @@ check_posterior_probs()
 def masked_log_probs(
     logits: Tensor[[B, L, K]], candidate_mask: Tensor[[B, L, K]]
 ) -> Tensor[[B, L, K]]:
-    check_candidates(candidate_mask)
+    assert_candidates(candidate_mask)
     assert logits.shape == candidate_mask.shape
     mask = logits.masked_fill(~candidate_mask, float("-inf"))
     return F.log_softmax(mask, dim=-1)
@@ -730,8 +730,8 @@ def reverse_probs(
     earlier_time: Tensor[[B]],
     time: Tensor[[B]],
 ) -> Tensor[[B, L, K]]:
-    check_candidates(candidate_mask)
-    check_simplex(clean_probabilities)
+    assert_candidates(candidate_mask)
+    assert_simplex(clean_probabilities)
     assert (
         clean_probabilities.shape == candidate_mask.shape
         and (clean_probabilities[~candidate_mask] == 0).all()
@@ -801,8 +801,8 @@ def bernoulli_kl(
     assert target_probs.shape == predicted_probs.shape, (
         "target_probs and predicted_probs must have the same shape"
     )
-    check_probabilities(target_probs)
-    check_probabilities(predicted_probs)
+    assert_probabilities(target_probs)
+    assert_probabilities(predicted_probs)
     target_probs, predicted_probs = (target_probs.double(), predicted_probs.double())
     return (
         torch.special.xlogy(target_probs, target_probs)
@@ -914,7 +914,7 @@ check_bernoulli_kl()
 def reconstruction_nll(
     clean_tokens: Tensor[[B, L]], predicted_probs: Tensor[[B, L, K]]
 ) -> Tensor[[B, L]]:
-    check_probabilities(predicted_probs)
+    assert_probabilities(predicted_probs)
     predcited_probs = predicted_probs.double()
     target_one_hot = one_hot_tokens(clean_tokens, predicted_probs.shape[-1]).double()
     return -(
@@ -1353,7 +1353,7 @@ def check_backbone():
     model = BFN_DIT(TOY)
     centroids = torch.full((2, TOY.length, TOY.vocab), 1 / TOY.vocab)
     output = model(centroids, torch.tensor([0.2, 0.8]))
-    check_shape(output, 2, TOY.length, TOY.vocab)
+    assert_shape(output, 2, TOY.length, TOY.vocab)
     assert output.eq(0).all()
     F.cross_entropy(
         output.reshape(-1, TOY.vocab), torch.zeros(2 * TOY.length, dtype=torch.long)
@@ -1392,7 +1392,7 @@ def check_predict_log_probs():
     candidate_mask = torch.ones(2, 3, 4, dtype=torch.bool)
     candidate_mask[:, :, 3] = False
     log_probabilities = predict_log_probs(model, candidate_mask, torch.ones(2))
-    check_simplex(log_probabilities.exp())
+    assert_simplex(log_probabilities.exp())
     assert log_probabilities.exp()[:, :, 3].eq(0).all()
     torch.testing.assert_close(
         log_probabilities.exp()[:, :, :3], torch.full((2, 3, 3), 1 / 3)
