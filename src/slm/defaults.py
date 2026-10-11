@@ -30,5 +30,12 @@ DEFAULT_CONFIG = SimpleNamespace(
         "windows": None,
     },
     sudoku={
+        "max_rating": 10,
+        "max_train_split": 16,
+        "max_validation_split": 8,
+        "max_test_split": 8,
+        "validation_boards": 4,
+        "sample_steps": 2,
+        "report_steps": 2,
     },
 )

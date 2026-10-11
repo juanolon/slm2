@@ -63,7 +63,7 @@ def add_tasks(command_parser):
     text8 = tasks.add_parser("text8")
     add_general_arguments(text8)
 
-    sudoku = tasks.add_parser("sudoku", help="not implemented yet")
+    sudoku = tasks.add_parser("sudoku")
     add_general_arguments(sudoku)
     return text8, sudoku
 
@@ -84,6 +84,7 @@ def build_smoke_command(commands):
     parser = commands.add_parser("smoke", help="Run smoke test")
     tasks = parser.add_subparsers(dest="task", required=True)
     tasks.add_parser("text8")
+    tasks.add_parser("sudoku")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -103,9 +104,11 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(f"{args.task} is not implemented yet")
     runner: TaskRunner = module.Runner()
     try:
-        if args.task in ["text8", "sudoku"]:
-            args.config = load_config(args.experiment, args.task)
-            runner.validate_config(args.config)
+        args.config = (
+            DEFAULT_CONFIG if args.command == "smoke"
+            else load_config(args.experiment, args.task)
+        )
+        runner.validate_config(args.config)
         match args.command:
             case "train":
                 runner.train(args)
@@ -113,7 +116,7 @@ def main(argv: list[str] | None = None) -> int:
                 runner.report(args)
             case "smoke":
                 runner.smoke(DEFAULT_CONFIG)
-    except (ValueError, FileNotFoundError, FileExistsError) as error:
+    except (TypeError, ValueError, FileNotFoundError, FileExistsError) as error:
         parser.error(str(error))
     return 0
 
