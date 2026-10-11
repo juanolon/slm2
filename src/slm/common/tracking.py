@@ -29,7 +29,7 @@ class ExperimentTracker:
         *,
         name: str,
         mode: str,
-        project: str,
+        project: str | None,
         entity: str | None = None,
         resume: bool = False,
     ):

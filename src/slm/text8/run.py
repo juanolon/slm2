@@ -18,7 +18,8 @@ from slm.common.ema import EMA
 from slm.common.schedules import LinearWarmup
 from slm.common.tracking import ExperimentTracker, NullTracker
 from slm.common.trainer import LifecycleOptions, Trainer, UpdateOptions
-from slm.slm.core import BFN_DIT, seed_all
+from slm.slm.backbone import BFN_DIT
+from slm.slm.core import seed_all
 
 from .data import ALPHABET, RandomWindowSource, load_text8
 from .evaluation import Text8Evaluator, evaluate_stream, generate
