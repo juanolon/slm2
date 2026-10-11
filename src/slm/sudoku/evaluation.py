@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import torch
 
+from slm.common.seeds import VALIDATION_SEED
 from slm.slm.core import predict_log_probs, prune_step
 
 from .data import valid_units
@@ -58,7 +59,7 @@ def sudoku_scores(predictions, questions, answers):
     }
 
 
-def evaluate_sudoku(model, split, config, device, limit=None, seed=1234):
+def evaluate_sudoku(model, split, config, device, limit=None, seed=VALIDATION_SEED):
     count = (
         len(split["questions"])
         if limit is None
@@ -92,6 +93,6 @@ class SudokuEvaluator:
             self.config,
             next(model.parameters()).device,
             self.config.validation_boards,
-            seed=1234,
+            seed=VALIDATION_SEED,
         )
         return {f"validation/{key}": value for key, value in scores.items()}

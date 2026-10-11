@@ -25,4 +25,4 @@ text8:
   validation_windows: 4096
   validation_draws: 1
   draws: 8
-  windows: null  # Final evaluation: split length // sequence length, random starts.
+  windows: 19531

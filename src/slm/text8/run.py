@@ -13,6 +13,7 @@ import torch
 from slm.common.checkpoint import CheckpointManager, load_checkpoint
 from slm.common.config import PARAMETERS
 from slm.common.contracts import TaskRunner
+from slm.common.seeds import SAMPLE_SEED, TEST_SEED, VALIDATION_SEED
 from slm.common.tracking import ExperimentTracker, NullTracker
 from slm.common.trainer import LifecycleOptions, Trainer, UpdateOptions
 from slm.slm.backbone import BFN_DIT
@@ -21,6 +22,9 @@ from slm.slm.core import seed_all
 from .data import ALPHABET, RandomWindowSource, load_text8
 from .evaluation import Text8Evaluator, evaluate_stream, generate
 from .task import Text8Task
+
+TABLE1_BPC = {"weighted": 1.38, "simple": 1.42}
+SAMPLE_NFE = 1000  # 999 pruning transitions, then a time-zero decode.
 
 
 class BPCSelection:
@@ -109,12 +113,11 @@ class Runner(TaskRunner):
         settings = args.config.text8
         run_path = Path(args.run_dir)
 
-        state = load_checkpoint(run_path / "best.pt")
-
         device = torch.device(args.device)
         _, valid, test, fingerprint = load_text8(args.data_dir)
-
-        CheckpointManager(run_path, vars(config), fingerprint).validate(state)
+        checkpoints = CheckpointManager(run_path, vars(config), fingerprint)
+        state = load_checkpoint(run_path / "best.pt")
+        checkpoints.validate(state)
         model = BFN_DIT(config).to(device).eval()
         model.load_state_dict(state["ema"]["model"])
         completed = state["progress"]["completed_updates"]
@@ -127,14 +130,21 @@ class Runner(TaskRunner):
             config,
             windows or len(valid) // config.length,
             draws,
-            seed=1234,
+            seed=VALIDATION_SEED,
         )
         testing = evaluate_stream(
-            model, test, config, windows or len(test) // config.length, draws, seed=5678
+            model,
+            test,
+            config,
+            windows or len(test) // config.length,
+            draws,
+            seed=TEST_SEED,
         )
         report = {
             "checkpoint_step": completed,
             "objective": config.objective,
+            "config": vars(config),
+            "data_fingerprint": fingerprint,
             "validation": validation,
             "test": testing,
         }
@@ -161,9 +171,18 @@ class Runner(TaskRunner):
             )
 
             tracker.run.summary["final_test_bpc"] = testing["bpc"]
-            seed_all(123)
+            tracker.run.summary["final_test_mc_se"] = testing["mc_se"]
+            tracker.run.summary["selected_checkpoint_step"] = completed
+            seed_all(SAMPLE_SEED)
 
-            tokens = generate(model, 4, 256, 27, steps=999, device=device)
+            tokens = generate(
+                model,
+                4,
+                config.length,
+                config.vocab,
+                steps=SAMPLE_NFE - 1,
+                device=device,
+            )
             texts = [
                 "".join(ALPHABET[token] for token in row)
                 for row in tokens.cpu().tolist()

@@ -13,6 +13,7 @@ import torch
 from slm.common.checkpoint import CheckpointManager, load_checkpoint
 from slm.common.config import PARAMETERS
 from slm.common.contracts import TaskRunner
+from slm.common.seeds import SAMPLE_SEED, TEST_SEED
 from slm.common.tracking import ExperimentTracker, NullTracker
 from slm.common.trainer import LifecycleOptions, Trainer, UpdateOptions
 from slm.slm.backbone import BFN_DIT
@@ -151,14 +152,14 @@ class Runner(TaskRunner):
             **{**vars(config), "sample_steps": args.config.sudoku["report_steps"]}
         )
         scores = evaluate_sudoku(
-            model, data["test"], evaluation_config, device, seed=5678
+            model, data["test"], evaluation_config, device, seed=TEST_SEED
         )
         completed = state["progress"]["completed_updates"]
 
         report = {
             "scores": scores,
             "boards": len(data["test"]["questions"]),
-            "seed": 5678,
+            "seed": TEST_SEED,
             "sample_steps": evaluation_config.sample_steps,
             "checkpoint_step": completed,
             "max_rating": config.max_rating,
@@ -190,7 +191,7 @@ class Runner(TaskRunner):
                 model,
                 questions,
                 evaluation_config.sample_steps,
-                torch.Generator(device=device).manual_seed(999),
+                torch.Generator(device=device).manual_seed(SAMPLE_SEED),
             )
             rows = [
                 [

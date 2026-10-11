@@ -5,6 +5,7 @@ import math
 import numpy as np
 import torch
 
+from slm.common.seeds import VALIDATION_SEED
 from slm.slm.core import (
     elbo_term,
     predict_log_probs,
@@ -34,7 +35,7 @@ def estimate_bpc(model, clean_tokens, config):
         model.train(old)
 
 
-def evaluate_stream(model, ids, config, windows, draws, seed=1234):
+def evaluate_stream(model, ids, config, windows, draws, seed=VALIDATION_SEED):
     assert windows > 0 and draws > 0 and len(ids) >= config.length
     device = next(model.parameters()).device
     generator = torch.Generator().manual_seed(seed)
@@ -89,7 +90,7 @@ class Text8Evaluator:
             self.config,
             self.config.validation_windows,
             self.config.validation_draws,
-            seed=1234,
+            seed=VALIDATION_SEED,
         )
         return {"validation/bpc": result["bpc"]}
 
