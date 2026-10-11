@@ -26,6 +26,11 @@ def export_notebook(notebook_path, output_path):
                 if not statement.name.startswith("check_"):
                     exported_statements.append(statement)
 
+            elif (isinstance(statement, ast.If)
+                  and isinstance(statement.test, ast.Name)
+                  and statement.test.id == "TYPE_CHECKING"):
+                exported_statements.append(statement)
+
             elif isinstance(
                 statement,
                 (

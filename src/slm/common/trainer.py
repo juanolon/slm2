@@ -11,8 +11,8 @@ from typing import Any
 import torch
 from torch import nn
 
-from .ema import EMA
 from .contracts import Progress, Task
+from .ema import EMA
 
 
 @dataclass(frozen=True)
