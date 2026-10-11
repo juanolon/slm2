@@ -3,7 +3,6 @@ from __future__ import annotations
 import os
 import random
 import tempfile
-from contextlib import contextmanager
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -11,7 +10,7 @@ from typing import Any
 import numpy as np
 import torch
 
-from .state import Progress
+from .contracts import Progress
 
 
 def capture_rng() -> dict:
@@ -34,16 +33,6 @@ def restore_rng(state: dict) -> None:
         ):
             raise ValueError("Cannot restore CUDA RNG on a different device topology")
         torch.cuda.set_rng_state_all([item.cpu() for item in state["cuda"]])
-
-
-@contextmanager
-def preserve_rng():
-    """Keep initialization or evaluation from advancing training randomness."""
-    state = capture_rng()
-    try:
-        yield
-    finally:
-        restore_rng(state)
 
 
 def atomic_save(state: Any, path: str | Path) -> None:
@@ -73,7 +62,6 @@ def load_checkpoint(path: str | Path) -> dict:
         "optimizer",
         "ema",
         "lr_policy",
-        "source",
         "selection",
         "progress",
         "rng",
@@ -108,7 +96,6 @@ class CheckpointManager:
         optimizer,
         ema,
         lr_policy,
-        source,
         selection,
         progress,
         tracking_identity,
@@ -122,7 +109,6 @@ class CheckpointManager:
             "optimizer": optimizer.state_dict(),
             "ema": ema.state_dict(),
             "lr_policy": lr_policy.state_dict(),
-            "source": source.state_dict(),
             "selection": selection.state_dict(),
             "progress": asdict(progress),
             "rng": capture_rng(),
@@ -132,14 +118,13 @@ class CheckpointManager:
         if is_best:
             atomic_save(state, self.run_dir / "best.pt")
 
-    def restore(self, model, optimizer, ema, lr_policy, source, selection):
+    def restore(self, model, optimizer, ema, lr_policy, selection):
         state = load_checkpoint(self.last_path)
         self.validate(state)
         model.load_state_dict(state["model"])
         optimizer.load_state_dict(state["optimizer"])
         ema.load_state_dict(state["ema"])
         lr_policy.load_state_dict(state["lr_policy"])
-        source.load_state_dict(state["source"])
         selection.load_state_dict(state["selection"])
         restore_rng(state["rng"])
         return Progress(**state["progress"])

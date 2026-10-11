@@ -1,12 +1,14 @@
-"""Small component contracts. No diffusion or experiment mathematics live here."""
-
 from __future__ import annotations
 
+from argparse import Namespace
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Protocol
+from pathlib import Path
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, Any, Protocol
 
-from torch import Tensor, nn
+if TYPE_CHECKING:
+    from torch import Tensor, nn
 
 
 @dataclass
@@ -15,6 +17,26 @@ class Progress:
 
     completed_updates: int = 0
     elapsed_seconds: float = 0.0
+
+
+class TaskRunner(Protocol):
+    """Train/report receive CLI arguments with YAML settings in args.config."""
+
+    def validate_config(self, config: SimpleNamespace) -> None:
+        """Validate only this task's section before command dispatch."""
+        ...
+
+    def train(self, args: Namespace) -> Path:
+        """Train or resume a configured run and return its checkpoint path."""
+        ...
+
+    def report(self, args: Namespace) -> dict[str, Any]:
+        """Evaluate selected weights and return the final report."""
+        ...
+
+    def smoke(self, config: SimpleNamespace) -> None:
+        """Check the trainer with fixed tiny CPU settings, without CLI options."""
+        ...
 
 
 class Stateful(Protocol):
@@ -29,8 +51,8 @@ class Stateful(Protocol):
         ...
 
 
-class TrainingSource(Stateful, Protocol):
-    """Supply training batches and save any sampling state needed to resume."""
+class TrainingSource(Protocol):
+    """Supply training batches"""
 
     def next_batch(self) -> Any:
         """Sample and return the next effective training batch."""
@@ -38,14 +60,7 @@ class TrainingSource(Stateful, Protocol):
 
 
 class Task(Protocol):
-    """Interface for batch preparation and loss computation, not optimizer updates.
-
-    Prepare full-batch timesteps before splitting; defer corruption if needed.
-
-    loss() returns a scalar *microbatch mean*. The trainer weights it by
-    microbatch size / effective batch size. Preparation runs outside autocast;
-    loss runs inside it. Tasks may corrupt in either phase to preserve RNG order.
-    """
+    """Interface for batch preparation and loss computation."""
 
     def prepare(self, batch: Any) -> Any:
         """Prepare the full batch, sampling timesteps before microbatch splitting."""

@@ -1,0 +1,34 @@
+from types import SimpleNamespace
+
+DEFAULT_CONFIG = SimpleNamespace(
+    T=8,
+    hidden=32,
+    heads=4,
+    blocks=2,
+    cond=16,
+    dropout=0.0,
+    global_batch=8,
+    microbatch=4,
+    lr=0.0005,
+    betas=(0.9, 0.999),
+    eps=1e-8,
+    weight_decay=0.0,
+    warmup=1,
+    max_steps=2,
+    ema=0.9,
+    clip=1.0,
+    seed=1,
+    objective="weighted",
+    validate_every=2,
+    amp=False,
+    text8={
+        "vocab": 27,
+        "length": 12,
+        "validation_windows": 8,
+        "validation_draws": 2,
+        "draws": 8,
+        "windows": None,
+    },
+    sudoku={
+    },
+)

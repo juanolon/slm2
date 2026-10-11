@@ -6,7 +6,19 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from .checkpoint import preserve_rng
+
+class NullTracker:
+    def __init__(self, *args, **kwargs):
+        self.identity = {}
+
+    def log(self, optimizer_step, metrics):
+        pass
+
+    def artifact(self, name, value):
+        pass
+
+    def finish(self, exit_code=0):
+        pass
 
 
 class ExperimentTracker:
@@ -21,9 +33,7 @@ class ExperimentTracker:
         entity: str | None = None,
         resume: bool = False,
     ):
-        # W&B might generate random numbers internally, and could consume the same random stream. save RNG before initialization
-        with preserve_rng():
-            self._initialize(run_dir, config, name, mode, project, entity, resume)
+        self._initialize(run_dir, config, name, mode, project, entity, resume)
 
     def _initialize(self, run_dir, config, name, mode, project, entity, resume):
         import wandb
@@ -55,7 +65,7 @@ class ExperimentTracker:
             entity=entity,
             id=run_id,
             group=experiment_id,
-            name=f"{name}-{run_id}",
+            name=name,
             config=dict(config),
             dir=str(self.run_dir),
             mode=mode,
@@ -74,6 +84,7 @@ class ExperimentTracker:
                 "url": getattr(self.run, "url", None),
                 "mode": mode,
                 "experiment_id": experiment_id,
+                "name": name,
             }
             identity_path.write_text(json.dumps(self.identity, indent=2))
         except BaseException:
@@ -81,7 +92,7 @@ class ExperimentTracker:
             raise
 
     def log(self, optimizer_step: int, metrics: Mapping[str, Any]) -> None:
-        record = {"optimizer_step": int(optimizer_step), **metrics}
+        record = {"optimizer_step": optimizer_step, **metrics}
         with (self.run_dir / "metrics.jsonl").open("a") as handle:
             handle.write(
                 json.dumps({**record, "run_segment": self.identity["id"]}) + "\n"

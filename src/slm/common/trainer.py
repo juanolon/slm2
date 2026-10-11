@@ -11,9 +11,8 @@ from typing import Any
 import torch
 from torch import nn
 
-from .checkpoint import preserve_rng
 from .ema import EMA
-from .state import Progress, Task
+from .contracts import Progress, Task
 
 
 @dataclass(frozen=True)
@@ -187,7 +186,6 @@ class Trainer:
                 self.optimizer,
                 self.ema,
                 self.lr_policy,
-                self.source,
                 self.selection,
                 self.progress,
                 self.tracker.identity,
@@ -242,7 +240,7 @@ class Trainer:
                 if evaluated:
                     old_mode = self.ema.model.training
                     try:
-                        with preserve_rng(), torch.no_grad():
+                        with torch.no_grad():
                             self.ema.model.eval()
                             metrics.update(self.evaluator(self.ema.model))
                     finally:

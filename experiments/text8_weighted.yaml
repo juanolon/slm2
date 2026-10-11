@@ -1,0 +1,31 @@
+# Validated notebook's production text8 settings.
+# Shared model/training parameters.
+T: 1000
+hidden: 768
+heads: 12
+blocks: 12
+cond: 128
+dropout: 0.1
+global_batch: 128
+microbatch: 8
+lr: 0.0005
+betas: [0.9, 0.999]
+eps: 1.0e-8
+weight_decay: 0.0
+warmup: 2500
+max_steps: 1000000
+ema: 0.9999
+clip: 1.0
+seed: 1
+objective: weighted
+validate_every: 347
+amp: true
+
+# Text8 data and evaluation parameters.
+text8:
+  vocab: 27
+  length: 256
+  validation_windows: 4096
+  validation_draws: 1
+  draws: 8
+  windows: null  # Final evaluation: split length // sequence length, random starts.
