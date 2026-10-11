@@ -2,17 +2,25 @@ from __future__ import annotations
 
 import json
 import signal
+import sys
 import threading
 import time
 from contextlib import nullcontext
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import torch
 from torch import nn
 
+from slm.slm.backbone import BFN_DIT
+from slm.slm.core import seed_all
+
+from .checkpoint import CheckpointManager
 from .contracts import Progress, Task
 from .ema import EMA
+from .schedules import LinearWarmup
+from .tracking import ExperimentTracker
 
 
 @dataclass(frozen=True)
@@ -146,33 +154,108 @@ class StopRequest:
 class Trainer:
     def __init__(
         self,
+        config,
+        run_dir,
+        fingerprint,
         *,
-        model,
         task,
         source,
-        optimizer,
-        lr_policy,
-        ema,
         evaluator,
         selection,
-        tracker,
-        checkpoint_manager,
-        update_options,
-        lifecycle_options,
-        progress=None,
+        update_options: UpdateOptions,
+        lifecycle_options: LifecycleOptions,
+        device="cuda",
+        resume=False,
+        wandb_mode="online",
+        project=None,
+        entity=None,
+        name=None,
         stop_request=None,
+        tracker_factory=ExperimentTracker,
+        selected_sizes=None,
+        data_metadata=None,
     ):
-        self.model, self.task, self.source = model, task, source
-        self.optimizer, self.lr_policy, self.ema = optimizer, lr_policy, ema
-        self.evaluator, self.selection, self.tracker = evaluator, selection, tracker
-        self.checkpoints = checkpoint_manager
-        self.update_options, self.options = update_options, lifecycle_options
-        self.progress = progress or Progress()
+        device = torch.device(device)
+        self.task, self.source = task, source
+        self.evaluator, self.selection = evaluator, selection
         self.stop = stop_request or StopRequest()
+        self.update_options = update_options
+        self.options = lifecycle_options
+        run_path = Path(run_dir)
+        self.checkpoints = CheckpointManager(
+            run_path,
+            vars(config),
+            fingerprint,
+        )
+        if self.checkpoints.last_path.exists() and not resume:
+            raise FileExistsError("Use a fresh --run-dir or specify --resume")
+        tracker = None
+        try:
+            # Tracker startup randomness is discarded by fresh seeding or RNG restore.
+            tracker = tracker_factory(
+                run_path,
+                vars(config),
+                name=name or config.objective,
+                mode=wandb_mode,
+                project=project,
+                entity=entity,
+                resume=resume,
+            )
+            self.tracker = tracker
+            seed_all(config.seed)
+            self.model = BFN_DIT(config).to(device)
+            self.ema = EMA(self.model, config.ema)
+            self.optimizer = torch.optim.AdamW(
+                self.model.parameters(),
+                lr=config.lr,
+                betas=config.betas,
+                eps=config.eps,
+                weight_decay=config.weight_decay,
+            )
+            self.lr_policy = LinearWarmup(config.lr, config.warmup)
+            self.progress = (
+                self.checkpoints.restore(
+                    self.model, self.optimizer, self.ema, self.lr_policy, self.selection
+                )
+                if resume
+                else Progress()
+            )
+            if self.progress.completed_updates < self.options.max_steps:
+                manifest = {
+                    "config": vars(config),
+                    "data_fingerprint": fingerprint,
+                    "torch": torch.__version__,
+                    "python": sys.version,
+                    "cuda": torch.version.cuda,
+                    "device": str(device),
+                    "gpu": torch.cuda.get_device_name(device)
+                    if device.type == "cuda"
+                    else None,
+                    "parameter_count": sum(p.numel() for p in self.model.parameters()),
+                    "wandb": dict(tracker.identity),
+                }
+                if selected_sizes is not None:
+                    manifest["selected"] = selected_sizes
+                run_path.mkdir(parents=True, exist_ok=True)
+                (run_path / "manifest.json").write_text(json.dumps(manifest, indent=2))
+                if data_metadata is not None:
+                    (run_path / "data_selection.json").write_text(
+                        json.dumps(data_metadata, indent=2)
+                    )
+        except BaseException:
+            if tracker is not None:
+                tracker.finish(exit_code=1)
+            raise
 
     def run(self):
-        device = next(self.model.parameters()).device
         options = self.options
+        if self.progress.completed_updates >= options.max_steps:
+            print(
+                "All configured optimizer updates are complete; use the report command."
+            )
+            self.tracker.finish()
+            return self.checkpoints.last_path
+        device = next(self.model.parameters()).device
         previous_elapsed = self.progress.elapsed_seconds
         clock = time.monotonic()
         last_save = interval_start = clock

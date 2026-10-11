@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import sys
 from argparse import Namespace
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -13,9 +12,7 @@ import torch
 
 from slm.common.checkpoint import CheckpointManager, load_checkpoint
 from slm.common.config import PARAMETERS
-from slm.common.contracts import Progress, TaskRunner
-from slm.common.ema import EMA
-from slm.common.schedules import LinearWarmup
+from slm.common.contracts import TaskRunner
 from slm.common.tracking import ExperimentTracker, NullTracker
 from slm.common.trainer import LifecycleOptions, Trainer, UpdateOptions
 from slm.slm.backbone import BFN_DIT
@@ -56,121 +53,6 @@ def model_config(config):
     )
 
 
-def run_training(
-    train_tokens,
-    validation_tokens,
-    fingerprint,
-    config,
-    run_dir,
-    *,
-    device="cuda",
-    resume=False,
-    wandb_mode="online",
-    project="slm-paper",
-    entity=None,
-    checkpoint_every=250,
-    checkpoint_seconds=600,
-    max_hours=None,
-    stop_after_updates=None,
-    stop_request=None,
-    tracker_factory=ExperimentTracker,
-    name=None,
-):
-    device = torch.device(device)
-    lifecycle = LifecycleOptions(
-        config.max_steps,
-        config.validate_every,
-        checkpoint_every,
-        checkpoint_seconds,
-        False,
-        "systemlog/characters_per_second",
-        config.global_batch * config.length,
-        max_hours,
-        stop_after_updates,
-    )
-    run_path = Path(run_dir)
-    manager = CheckpointManager(run_path, vars(config), fingerprint)
-    if manager.last_path.exists() and not resume:
-        raise FileExistsError("Use a fresh --run-dir or specify --resume")
-    tracker = None
-    try:
-        tracker = tracker_factory(
-            run_path,
-            vars(config),
-            name=name or config.objective,
-            mode=wandb_mode,
-            project=project,
-            entity=entity,
-            resume=resume,
-        )
-        seed_all(config.seed)
-
-        model = BFN_DIT(config).to(device)
-        ema = EMA(model, config.ema)
-        optimizer = torch.optim.AdamW(
-            model.parameters(),
-            lr=config.lr,
-            betas=config.betas,
-            eps=config.eps,
-            weight_decay=config.weight_decay,
-        )
-        source = RandomWindowSource(train_tokens, config.global_batch, config.length)
-        lr_policy = LinearWarmup(config.lr, config.warmup)
-        selection = BPCSelection()
-
-        progress = (
-            manager.restore(model, optimizer, ema, lr_policy, selection)
-            if resume
-            else Progress()
-        )
-        if progress.completed_updates >= config.max_steps:
-            print(
-                "All configured optimizer updates are complete; use the report command."
-            )
-            tracker.finish()
-            return manager.last_path
-
-        manifest = {
-            "config": vars(config),
-            "data_fingerprint": fingerprint,
-            "torch": torch.__version__,
-            "python": sys.version,
-            "cuda": torch.version.cuda,
-            "device": str(device),
-            "gpu": torch.cuda.get_device_name(device)
-            if device.type == "cuda"
-            else None,
-            "parameter_count": sum(p.numel() for p in model.parameters()),
-            "wandb": dict(tracker.identity),
-        }
-        run_path.mkdir(parents=True, exist_ok=True)
-        (run_path / "manifest.json").write_text(json.dumps(manifest, indent=2))
-
-    except BaseException:
-        if tracker is not None:
-            tracker.finish(exit_code=1)
-        raise
-
-    return Trainer(
-        model=model,
-        task=Text8Task(config),
-        source=source,
-        optimizer=optimizer,
-        lr_policy=lr_policy,
-        ema=ema,
-        evaluator=Text8Evaluator(validation_tokens, config),
-        selection=selection,
-        tracker=tracker,
-        checkpoint_manager=manager,
-        update_options=UpdateOptions(
-            config.microbatch, config.clip, config.amp, True, False
-        ),
-        lifecycle_options=lifecycle,
-        progress=progress,
-        stop_request=stop_request,
-    ).run()
-
-
 class Runner(TaskRunner):
     def validate_config(self, config: SimpleNamespace) -> None:
         settings = vars(config).get("text8")
@@ -192,23 +74,35 @@ class Runner(TaskRunner):
     def train(self, args: Namespace) -> Path:
         config = model_config(args.config)
         train_tokens, validation_tokens, _, fingerprint = load_text8(args.data_dir)
-        return run_training(
-            train_tokens,
-            validation_tokens,
-            fingerprint,
+        return Trainer(
             config,
             args.run_dir,
+            fingerprint,
+            task=Text8Task(config),
+            source=RandomWindowSource(train_tokens, config.global_batch, config.length),
+            evaluator=Text8Evaluator(validation_tokens, config),
+            selection=BPCSelection(),
+            update_options=UpdateOptions(
+                config.microbatch, config.clip, config.amp, True, False
+            ),
+            lifecycle_options=LifecycleOptions(
+                config.max_steps,
+                config.validate_every,
+                args.checkpoint_every,
+                args.checkpoint_seconds,
+                False,
+                "systemlog/characters_per_second",
+                config.global_batch * config.length,
+                args.max_hours,
+                args.stop_after_updates,
+            ),
             device=args.device,
             name=args.name or Path(args.experiment).stem,
             resume=args.resume,
             wandb_mode=args.wandb_mode,
             entity=args.entity,
             project=args.project,
-            checkpoint_every=args.checkpoint_every,
-            checkpoint_seconds=args.checkpoint_seconds,
-            max_hours=args.max_hours,
-            stop_after_updates=args.stop_after_updates,
-        )
+        ).run()
 
     def report(self, args: Namespace) -> dict[str, Any]:
         config = model_config(args.config)
@@ -296,15 +190,29 @@ class Runner(TaskRunner):
         train_tokens = torch.arange(512) % config.vocab
         validation_tokens = torch.arange(128) % config.vocab
         with TemporaryDirectory(prefix="slm-smoke-") as run_dir:
-            run_training(
-                train_tokens,
-                validation_tokens,
-                "periodic-fake-v1",
+            Trainer(
                 config,
                 run_dir,
+                "periodic-fake-v1",
+                task=Text8Task(config),
+                source=RandomWindowSource(
+                    train_tokens, config.global_batch, config.length
+                ),
+                evaluator=Text8Evaluator(validation_tokens, config),
+                selection=BPCSelection(),
+                update_options=UpdateOptions(
+                    config.microbatch, config.clip, config.amp, True, False
+                ),
+                lifecycle_options=LifecycleOptions(
+                    config.max_steps,
+                    config.validate_every,
+                    2,
+                    None,
+                    False,
+                    "systemlog/characters_per_second",
+                    config.global_batch * config.length,
+                ),
                 device="cpu",
                 tracker_factory=NullTracker,
-                checkpoint_every=2,
-                checkpoint_seconds=None,
-            )
+            ).run()
         print("Smoke check passed.")
