@@ -50,7 +50,7 @@ def fetch_csvs(data_dir="data"):
             from huggingface_hub import hf_hub_download
 
             hf_hub_download(
-                repo_id="sapientinc/sudoku-extreme256",
+                repo_id="sapientinc/sudoku-extreme",
                 filename=path.name,
                 repo_type="dataset",
                 revision="main",
