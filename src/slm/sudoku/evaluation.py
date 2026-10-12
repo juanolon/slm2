@@ -9,7 +9,7 @@ from .data import valid_units
 from .task import blank_mean, clamp_clues, initial_candidates
 
 
-def solve_sudoku(model, questions, steps, generator=None):
+def solve_sudoku(model, questions, steps, generator=None, observer=None):
     if steps < 1:
         raise ValueError("steps must be positive")
     old_mode = model.training
@@ -17,6 +17,8 @@ def solve_sudoku(model, questions, steps, generator=None):
     try:
         with torch.inference_mode():
             candidates = initial_candidates(questions)
+            if observer is not None:
+                observer(0, candidates)
             for index in range(steps, 0, -1):
                 time = torch.full(
                     (len(questions),),
@@ -27,6 +29,8 @@ def solve_sudoku(model, questions, steps, generator=None):
                 earlier = torch.full_like(time, (index - 1) / steps)
                 candidates = prune_step(model, candidates, earlier, time, generator)
                 candidates = clamp_clues(candidates, questions)
+                if observer is not None:
+                    observer(steps - index + 1, candidates)
             log_probs = predict_log_probs(
                 model, candidates, torch.zeros(len(questions), device=questions.device)
             )

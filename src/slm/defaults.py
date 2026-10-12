@@ -37,6 +37,5 @@ DEFAULT_CONFIG = SimpleNamespace(
         "max_test_split": 8,
         "validation_boards": 4,
         "sample_steps": 2,
-        "report_steps": 2,
     },
 )

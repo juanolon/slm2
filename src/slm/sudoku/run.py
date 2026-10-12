@@ -15,7 +15,7 @@ import torch
 from slm.common.checkpoint import CheckpointManager, load_checkpoint
 from slm.common.config import PARAMETERS
 from slm.common.contracts import TaskRunner
-from slm.common.seeds import SAMPLE_SEED, TEST_SEED
+from slm.common.seeds import TEST_SEED
 from slm.common.tracking import ExperimentTracker, NullTracker
 from slm.common.trainer import LifecycleOptions, Trainer, UpdateOptions
 from slm.slm.backbone import BFN_DIT
@@ -23,11 +23,11 @@ from slm.slm.backbone import BFN_DIT
 from .data import (
     RandomBoardSource,
     data_fingerprint,
-    decode_board,
     load_sudoku,
     pack_rows,
 )
-from .evaluation import SudokuEvaluator, evaluate_sudoku, solve_sudoku
+from .evaluation import SudokuEvaluator
+from .report import REPORT_STEPS, evaluate_report, log_report
 from .task import SudokuTask
 
 SUDOKU_TRAINING_FIELDS = (
@@ -94,7 +94,7 @@ def _smoke_data():
 class Runner(TaskRunner):
     def validate_config(self, config: SimpleNamespace) -> None:
         settings = config.sudoku
-        missing = (set(SUDOKU_TRAINING_FIELDS) | {"report_steps"}) - settings.keys()
+        missing = set(SUDOKU_TRAINING_FIELDS) - settings.keys()
         if missing:
             raise ValueError(f"Missing sudoku settings: {sorted(missing)}")
         for key in (
@@ -103,7 +103,6 @@ class Runner(TaskRunner):
             "max_test_split",
             "validation_boards",
             "sample_steps",
-            "report_steps",
         ):
             if type(settings[key]) is not int or settings[key] < 1:
                 raise ValueError(f"sudoku.{key} must be a positive integer")
@@ -148,8 +147,9 @@ class Runner(TaskRunner):
     def report(self, args: Namespace) -> dict[str, Any]:
         config = model_config(args.config)
         run_path = Path(args.run_dir)
-        legacy = getattr(args, "legacy", False)
-        if legacy:
+        device = torch.device(args.device)
+        manifest_path = run_path / "manifest.json"
+        if getattr(args, "legacy", False):
             state = torch.load(
                 run_path / "best.pt", map_location="cpu", weights_only=False
             )
@@ -170,57 +170,59 @@ class Runner(TaskRunner):
                     )
             ema_weights = state["ema"]
             completed = state["next_step"]
+            checkpoint_fingerprint = state["fingerprint"]
+            data, metadata = load_sudoku(config, args.data_dir)
+            if checkpoint_fingerprint != metadata["fingerprint"]:
+                warnings.warn(
+                    "Legacy checkpoint dataset differs from the current selection; reporting on the current dataset"
+                )
+            tracking = (
+                json.loads(manifest_path.read_text())["wandb"]
+                if manifest_path.exists()
+                else {"mode": "online", "project": "sudoku", "entity": None}
+            )
         else:
             state = load_checkpoint(run_path / "best.pt")
             ema_weights = state["ema"]["model"]
             completed = state["progress"]["completed_updates"]
-
-        device = torch.device(args.device)
-        data, metadata = load_sudoku(config, args.data_dir)
-
-        if legacy and state["fingerprint"] != metadata["fingerprint"]:
-            warnings.warn(
-                "Legacy checkpoint dataset differs from the current selection; reporting on the current dataset"
+            checkpoint_fingerprint = state["data_fingerprint"]
+            validation_config = SimpleNamespace(
+                **{**vars(config), "max_test_split": state["config"]["max_test_split"]}
             )
-        if not legacy:
+            data, metadata = load_sudoku(validation_config, args.data_dir)
             CheckpointManager(
                 run_path,
-                vars(config),
+                vars(validation_config),
                 metadata["fingerprint"],
             ).validate(state)
+            if config.max_test_split != validation_config.max_test_split:
+                del data
+                data, metadata = load_sudoku(config, args.data_dir)
+            tracking = json.loads(manifest_path.read_text())["wandb"]
+
         model = BFN_DIT(config).to(device).eval()
         model.load_state_dict(ema_weights)
 
-        evaluation_config = SimpleNamespace(
-            **{**vars(config), "sample_steps": args.config.sudoku["report_steps"]}
-        )
-        scores = evaluate_sudoku(
-            model, data["test"], evaluation_config, device, seed=TEST_SEED
-        )
+        test = data["test"]
+        results = evaluate_report(model, test, config, device)
         report = {
-            "scores": scores,
-            "boards": len(data["test"]["questions"]),
+            "by_steps": results,
+            "boards": len(test["questions"]),
             "seed": TEST_SEED,
-            "sample_steps": evaluation_config.sample_steps,
+            "sampling_budgets": list(REPORT_STEPS),
             "checkpoint_step": completed,
             "max_rating": config.max_rating,
-            "dataset_fingerprint": metadata["fingerprint"]
-            if legacy
-            else state["data_fingerprint"],
+            "dataset_fingerprint": data_fingerprint({"test": test}),
+            "checkpoint_dataset_fingerprint": checkpoint_fingerprint,
         }
         (run_path / "sudoku_report.json").write_text(json.dumps(report, indent=2))
-        tracking = (
-            {"mode": "online", "project": "sudoku", "entity": None}
-            if legacy and not (run_path / "manifest.json").exists()
-            else json.loads((run_path / "manifest.json").read_text())["wandb"]
-        )
         report_path = run_path / "report" / uuid4().hex
         report_path.mkdir(parents=True)
         (report_path / "sudoku_report.json").write_text(json.dumps(report, indent=2))
 
         tracker = ExperimentTracker(
             report_path,
-            vars(evaluation_config),
+            {**vars(config), "report_steps": list(REPORT_STEPS)},
             name=args.name or tracking.get("name") or config.objective,
             mode=args.wandb_mode or tracking["mode"],
             project=f"{args.project or tracking['project']}-report",
@@ -228,44 +230,30 @@ class Runner(TaskRunner):
             resume=False,
         )
         try:
-            tracker.log(
-                completed,
-                {f"report/test_{key}": value for key, value in scores.items()},
+            log_report(tracker, completed, results)
+            samples = {steps: result["samples"] for steps, result in results.items()}
+            (run_path / "sudoku_samples.json").write_text(json.dumps(samples, indent=2))
+            (report_path / "sudoku_samples.json").write_text(
+                json.dumps(samples, indent=2)
             )
-            for key, value in scores.items():
-                tracker.run.summary[f"test/{key}"] = value
-            count = min(4, config.microbatch, len(data["test"]["questions"]))
-            questions = data["test"]["questions"][:count].to(device)
-            predictions = solve_sudoku(
-                model,
-                questions,
-                evaluation_config.sample_steps,
-                torch.Generator(device=device).manual_seed(SAMPLE_SEED),
-            )
-            rows = [
-                [
-                    decode_board(question.cpu()),
-                    decode_board(prediction.cpu()),
-                    decode_board(answer),
-                ]
-                for question, prediction, answer in zip(
-                    questions, predictions, data["test"]["answers"][:count]
-                )
-            ]
-            (run_path / "sudoku_samples.json").write_text(json.dumps(rows, indent=2))
-            (report_path / "sudoku_samples.json").write_text(json.dumps(rows, indent=2))
             import wandb
 
-            tracker.artifact(
-                "samples/sudoku",
-                wandb.Table(columns=["question", "prediction", "reference"], data=rows),
+            artifact = wandb.Artifact(
+                f"sudoku-report-{report_path.name}", type="report"
             )
+            artifact.add_file(str(report_path / "sudoku_report.json"))
+            tracker.run.log_artifact(artifact)
         except BaseException:
             tracker.finish(exit_code=1)
             raise
         else:
             tracker.finish()
-        print(json.dumps(report, indent=2))
+        print(
+            json.dumps(
+                {key: value for key, value in report.items() if key != "by_steps"},
+                indent=2,
+            )
+        )
         return report
 
     def smoke(self, config: SimpleNamespace) -> None:
