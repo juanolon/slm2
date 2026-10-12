@@ -157,9 +157,9 @@ class Runner(TaskRunner):
         tracker = ExperimentTracker(
             report_path,
             vars(config),
-            name=args.name or f"{tracking.get('name') or config.objective}-report",
+            name=args.name or tracking.get("name") or config.objective,
             mode=args.wandb_mode or tracking["mode"],
-            project=args.project or f"{tracking['project']}-report",
+            project=f"{args.project or tracking['project']}-report",
             entity=args.entity if args.entity is not None else tracking.get("entity"),
             resume=False,
         )

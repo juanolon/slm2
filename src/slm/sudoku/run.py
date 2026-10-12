@@ -211,7 +211,7 @@ class Runner(TaskRunner):
         (run_path / "sudoku_report.json").write_text(json.dumps(report, indent=2))
         tracking = (
             {"mode": "online", "project": "sudoku", "entity": None}
-            if legacy
+            if legacy and not (run_path / "manifest.json").exists()
             else json.loads((run_path / "manifest.json").read_text())["wandb"]
         )
         report_path = run_path / "report" / uuid4().hex
@@ -221,9 +221,9 @@ class Runner(TaskRunner):
         tracker = ExperimentTracker(
             report_path,
             vars(evaluation_config),
-            name=args.name or f"{tracking.get('name') or config.objective}-report",
+            name=args.name or tracking.get("name") or config.objective,
             mode=args.wandb_mode or tracking["mode"],
-            project=args.project or f"{tracking['project']}-report",
+            project=f"{args.project or tracking['project']}-report",
             entity=args.entity if args.entity is not None else tracking.get("entity"),
             resume=False,
         )

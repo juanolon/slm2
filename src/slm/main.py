@@ -41,7 +41,7 @@ def add_general_arguments(parser):
         help="tracking mode (default: online)",
     )
     general.add_argument(
-        "--project", help="W&B project; report defaults to <training-project>-report"
+        "--project", help="W&B project; reports append -report to this or the training project"
     )
     general.add_argument("--entity", help="W&B account or team")
     general.add_argument(
