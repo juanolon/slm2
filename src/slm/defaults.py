@@ -30,6 +30,7 @@ DEFAULT_CONFIG = SimpleNamespace(
         "windows": None,
     },
     sudoku={
+        "dataset": "sudoku9x9",
         "max_rating": 10,
         "max_train_split": 16,
         "max_validation_split": 8,

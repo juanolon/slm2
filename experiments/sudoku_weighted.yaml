@@ -20,6 +20,7 @@ validate_every: 250
 amp: true
 
 sudoku:
+  dataset: sudoku9x9
   max_rating: 10
   max_train_split: 50000
   max_validation_split: 1000

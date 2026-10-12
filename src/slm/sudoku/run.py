@@ -29,6 +29,7 @@ from .evaluation import SudokuEvaluator, evaluate_sudoku, solve_sudoku
 from .task import SudokuTask
 
 SUDOKU_TRAINING_FIELDS = (
+    "dataset",
     "max_rating",
     "max_train_split",
     "max_validation_split",
@@ -39,22 +40,26 @@ SUDOKU_TRAINING_FIELDS = (
 
 
 def model_config(config):
+    small = config.sudoku["dataset"] == "sudoku4x4"
     return SimpleNamespace(
         **{key: vars(config)[key] for key in PARAMETERS},
         **{key: config.sudoku[key] for key in SUDOKU_TRAINING_FIELDS},
-        vocab=9,
-        length=81,
+        vocab=4 if small else 9,
+        length=16 if small else 81,
     )
 
 
 class SudokuSelection:
-    def __init__(self):
+    """Rank ambiguous puzzles by valid completions, not reference agreement."""
+
+    def __init__(self, ambiguous=False):
+        self.ambiguous = ambiguous
         self.best_score = (-1.0, -1.0)
 
     def consider(self, metrics):
         score = (
-            metrics["validation/exact_match"],
-            metrics["validation/blank_accuracy"],
+            metrics["validation/solve_rate" if self.ambiguous else "validation/exact_match"],
+            metrics["validation/unit_validity" if self.ambiguous else "validation/blank_accuracy"],
         )
         improved = score > self.best_score
         if improved:
@@ -107,7 +112,7 @@ class Runner(TaskRunner):
             task=SudokuTask(config),
             source=RandomBoardSource(data["train"], config.global_batch),
             evaluator=SudokuEvaluator(data["validation"], config),
-            selection=SudokuSelection(),
+            selection=SudokuSelection(ambiguous=config.vocab == 4),
             update_options=UpdateOptions(
                 config.microbatch, config.clip, config.amp, False, True
             ),

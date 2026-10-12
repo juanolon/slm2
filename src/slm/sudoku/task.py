@@ -12,8 +12,9 @@ from slm.slm.core import (
 
 
 def initial_candidates(questions):
-    assert questions.ndim == 2 and questions.shape[1] == 81
-    clues = one_hot_tokens(questions.clamp_min(0), 9).bool()
+    assert questions.ndim == 2 and questions.shape[1] in (16, 81)
+    vocab = 4 if questions.shape[1] == 16 else 9
+    clues = one_hot_tokens(questions.clamp_min(0), vocab).bool()
     return torch.where((questions >= 0)[..., None], clues, torch.ones_like(clues))
 
 
@@ -26,7 +27,8 @@ def clamp_clues(candidate_mask, questions):
 
 def conditional_forward(answers, questions, time, generator=None):
     assert answers.shape == questions.shape
-    return clamp_clues(sample_forward(answers, time, 9, generator), questions)
+    vocab = 4 if questions.shape[1] == 16 else 9
+    return clamp_clues(sample_forward(answers, time, vocab, generator), questions)
 
 
 def blank_mean(cell_losses, questions):

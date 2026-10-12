@@ -3,4 +3,5 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 runs/
+data/
 **/jupyter_ascending.log

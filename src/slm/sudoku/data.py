@@ -10,34 +10,36 @@ import torch
 
 
 def encode_board(text: str) -> torch.Tensor:
-    """Encode trusted CSV boards: blanks -1, digits 0..8."""
+    """Encode CSV boards: blanks -1, digits zero-indexed."""
     ids = np.frombuffer(text.replace(".", "0").encode("ascii"), dtype=np.uint8)
-    return torch.from_numpy(ids.astype(np.int64) - ord("1")).reshape(81)
+    return torch.from_numpy(ids.astype(np.int64) - ord("1")).reshape(len(text))
 
 
 def decode_board(tokens: torch.Tensor) -> str:
     if (
-        tokens.shape != (81,)
+        tokens.shape not in ((81,), (16,))
         or tokens.dtype != torch.long
-        or ((tokens < -1) | (tokens > 8)).any()
+        or ((tokens < -1) | (tokens > (3 if tokens.numel() == 16 else 8))).any()
     ):
-        raise ValueError("Expected [81] long IDs in -1..8")
+        raise ValueError("Expected [16] or [81] long Sudoku IDs")
     return "".join(
         "." if value == -1 else str(value + 1) for value in tokens.cpu().tolist()
     )
 
 
 def sudoku_units(boards: torch.Tensor) -> torch.Tensor:
-    assert boards.ndim == 2 and boards.shape[1] == 81
-    grid = boards.reshape(-1, 9, 9)
+    assert boards.ndim == 2 and boards.shape[1] in (16, 81)
+    side = 4 if boards.shape[1] == 16 else 9
+    box = 2 if side == 4 else 3
+    grid = boards.reshape(-1, side, side)
     columns = grid.transpose(1, 2)
-    boxes = grid.reshape(-1, 3, 3, 3, 3).permute(0, 1, 3, 2, 4).reshape(-1, 9, 9)
+    boxes = grid.reshape(-1, box, box, box, box).permute(0, 1, 3, 2, 4).reshape(-1, side, side)
     return torch.cat((grid, columns, boxes), dim=1)
 
 
 def valid_units(boards: torch.Tensor) -> torch.Tensor:
     sorted_units = torch.sort(sudoku_units(boards), dim=-1)[0]
-    return (sorted_units == torch.arange(9, device=boards.device)).all(-1)
+    return (sorted_units == torch.arange(sorted_units.shape[-1], device=boards.device)).all(-1)
 
 
 def fetch_csvs(data_dir="data"):
@@ -89,6 +91,16 @@ def data_fingerprint(data):
 
 
 def load_sudoku(config, data_dir="data"):
+    if config.dataset == "sudoku9x9":
+        return load_sudoku9x9(config, data_dir)
+    if config.dataset == "sudoku4x4":
+        from .data4x4 import load_sudoku4x4
+
+        return load_sudoku4x4(config, data_dir)
+    raise ValueError(f"Unknown sudoku dataset: {config.dataset}")
+
+
+def load_sudoku9x9(config, data_dir="data"):
     train_path, test_path = fetch_csvs(data_dir)
     # Preserve CSV order after rating filtering, just like a fixed stream split.
     rows = list(
@@ -120,7 +132,7 @@ class RandomBoardSource:
             questions.device.type != "cpu"
             or answers.device.type != "cpu"
             or questions.ndim != 2
-            or questions.shape[1] != 81
+            or questions.shape[1] not in (16, 81)
             or questions.shape != answers.shape
             or len(questions) < 1
             or batch_size < 1
