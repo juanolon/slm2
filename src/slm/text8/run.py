@@ -7,6 +7,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from typing import Any
+from uuid import uuid4
 
 import torch
 
@@ -149,7 +150,9 @@ class Runner(TaskRunner):
             "test": testing,
         }
         (run_path / "final_report.json").write_text(json.dumps(report, indent=2))
-        report_path = run_path / "report"
+        report_path = run_path / "report" / uuid4().hex
+        report_path.mkdir(parents=True)
+        (report_path / "final_report.json").write_text(json.dumps(report, indent=2))
 
         tracker = ExperimentTracker(
             report_path,
@@ -158,7 +161,7 @@ class Runner(TaskRunner):
             mode=args.wandb_mode or tracking["mode"],
             project=args.project or f"{tracking['project']}-report",
             entity=args.entity if args.entity is not None else tracking.get("entity"),
-            resume=(report_path / "wandb_identity.json").exists(),
+            resume=False,
         )
         try:
             tracker.log(
@@ -188,6 +191,7 @@ class Runner(TaskRunner):
                 for row in tokens.cpu().tolist()
             ]
             (run_path / "samples.txt").write_text("\n\n".join(texts))
+            (report_path / "samples.txt").write_text("\n\n".join(texts))
             import wandb
 
             tracker.artifact(

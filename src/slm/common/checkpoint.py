@@ -85,7 +85,13 @@ class CheckpointManager:
         return self.run_dir / "last.pt"
 
     def validate(self, state):
-        if state["config"] != self.config:
+        saved = dict(state["config"])
+        current = dict(self.config)
+        saved_max_steps = saved.pop("max_steps")
+        requested_max_steps = current.pop("max_steps")
+        if requested_max_steps < saved_max_steps:
+            raise ValueError("Checkpoint configuration differs: max_steps may only be increased")
+        if saved != current:
             raise ValueError("Checkpoint configuration differs; start a new run")
         if state["data_fingerprint"] != self.fingerprint:
             raise ValueError("Checkpoint dataset fingerprint differs")
