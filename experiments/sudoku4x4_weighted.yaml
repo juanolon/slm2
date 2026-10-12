@@ -28,4 +28,3 @@ sudoku:
   max_test_split: 1000
   validation_boards: 256
   sample_steps: 32
-  report_steps: 32
