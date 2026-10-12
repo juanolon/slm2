@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import warnings
 from argparse import Namespace
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -58,8 +59,14 @@ class SudokuSelection:
 
     def consider(self, metrics):
         score = (
-            metrics["validation/solve_rate" if self.ambiguous else "validation/exact_match"],
-            metrics["validation/unit_validity" if self.ambiguous else "validation/blank_accuracy"],
+            metrics[
+                "validation/solve_rate" if self.ambiguous else "validation/exact_match"
+            ],
+            metrics[
+                "validation/unit_validity"
+                if self.ambiguous
+                else "validation/blank_accuracy"
+            ],
         )
         improved = score > self.best_score
         if improved:
@@ -140,18 +147,48 @@ class Runner(TaskRunner):
     def report(self, args: Namespace) -> dict[str, Any]:
         config = model_config(args.config)
         run_path = Path(args.run_dir)
-        state = load_checkpoint(run_path / "best.pt")
+        legacy = getattr(args, "legacy", False)
+        if legacy:
+            state = torch.load(
+                run_path / "best.pt", map_location="cpu", weights_only=False
+            )
+            for key in (
+                "hidden",
+                "heads",
+                "blocks",
+                "cond",
+                "dropout",
+                "vocab",
+                "length",
+            ):
+                if key in state["config"] and state["config"][key] != getattr(
+                    config, key
+                ):
+                    raise ValueError(
+                        f"Legacy checkpoint model configuration differs: {key}"
+                    )
+            ema_weights = state["ema"]
+            completed = state["next_step"]
+        else:
+            state = load_checkpoint(run_path / "best.pt")
+            ema_weights = state["ema"]["model"]
+            completed = state["progress"]["completed_updates"]
 
         device = torch.device(args.device)
         data, metadata = load_sudoku(config, args.data_dir)
 
-        CheckpointManager(
-            run_path,
-            vars(config),
-            metadata["fingerprint"],
-        ).validate(state)
+        if legacy and state["fingerprint"] != metadata["fingerprint"]:
+            warnings.warn(
+                "Legacy checkpoint dataset differs from the current selection; reporting on the current dataset"
+            )
+        if not legacy:
+            CheckpointManager(
+                run_path,
+                vars(config),
+                metadata["fingerprint"],
+            ).validate(state)
         model = BFN_DIT(config).to(device).eval()
-        model.load_state_dict(state["ema"]["model"])
+        model.load_state_dict(ema_weights)
 
         evaluation_config = SimpleNamespace(
             **{**vars(config), "sample_steps": args.config.sudoku["report_steps"]}
@@ -159,8 +196,6 @@ class Runner(TaskRunner):
         scores = evaluate_sudoku(
             model, data["test"], evaluation_config, device, seed=TEST_SEED
         )
-        completed = state["progress"]["completed_updates"]
-
         report = {
             "scores": scores,
             "boards": len(data["test"]["questions"]),
@@ -168,10 +203,16 @@ class Runner(TaskRunner):
             "sample_steps": evaluation_config.sample_steps,
             "checkpoint_step": completed,
             "max_rating": config.max_rating,
-            "dataset_fingerprint": state["data_fingerprint"],
+            "dataset_fingerprint": metadata["fingerprint"]
+            if legacy
+            else state["data_fingerprint"],
         }
         (run_path / "sudoku_report.json").write_text(json.dumps(report, indent=2))
-        tracking = json.loads((run_path / "manifest.json").read_text())["wandb"]
+        tracking = (
+            {"mode": "online", "project": "sudoku", "entity": None}
+            if legacy
+            else json.loads((run_path / "manifest.json").read_text())["wandb"]
+        )
         report_path = run_path / "report"
 
         tracker = ExperimentTracker(

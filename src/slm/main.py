@@ -77,7 +77,10 @@ def build_train_command(commands):
 
 def build_report_command(commands):
     parser = commands.add_parser("report", help="Evaluate saved weights")
-    add_tasks(parser)
+    _, sudoku = add_tasks(parser)
+    sudoku.add_argument(
+        "--legacy", action="store_true", help="Load a legacy notebook Sudoku checkpoint"
+    )
 
 
 def build_smoke_command(commands):
