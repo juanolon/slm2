@@ -39,6 +39,13 @@ class TaskRunner(Protocol):
         ...
 
 
+class Report(Protocol):
+    """Run a task-specific report using resolved CLI arguments."""
+
+    def run(self, args: Namespace) -> dict[str, Any]:
+        ...
+
+
 class Stateful(Protocol):
     """Interface for components whose state is saved in checkpoints."""
 

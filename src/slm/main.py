@@ -77,7 +77,12 @@ def build_train_command(commands):
 
 def build_report_command(commands):
     parser = commands.add_parser("report", help="Evaluate saved weights")
-    _, sudoku = add_tasks(parser)
+    text8, sudoku = add_tasks(parser)
+    text8.add_argument("--report", choices=("default",), default="default")
+    sudoku.add_argument(
+        "--report", choices=("default", "sweep"), default="default",
+        help="Report implementation: single-budget default or six-budget sweep",
+    )
     sudoku.add_argument(
         "--legacy", action="store_true", help="Load a legacy notebook Sudoku checkpoint"
     )

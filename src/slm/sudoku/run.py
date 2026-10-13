@@ -1,24 +1,18 @@
 from __future__ import annotations
 
-import json
 import os
-import warnings
 from argparse import Namespace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from typing import Any
-from uuid import uuid4
 
 import torch
 
-from slm.common.checkpoint import CheckpointManager, load_checkpoint
 from slm.common.config import PARAMETERS
-from slm.common.contracts import TaskRunner
-from slm.common.seeds import TEST_SEED
-from slm.common.tracking import ExperimentTracker, NullTracker
+from slm.common.contracts import Report, TaskRunner
+from slm.common.tracking import NullTracker
 from slm.common.trainer import LifecycleOptions, Trainer, UpdateOptions
-from slm.slm.backbone import BFN_DIT
 
 from .data import (
     RandomBoardSource,
@@ -27,7 +21,7 @@ from .data import (
     pack_rows,
 )
 from .evaluation import SudokuEvaluator
-from .report import REPORT_STEPS, evaluate_report, log_report
+from .report import DefaultReport, SweepReport
 from .task import SudokuTask
 
 SUDOKU_TRAINING_FIELDS = (
@@ -145,116 +139,14 @@ class Runner(TaskRunner):
         ).run()
 
     def report(self, args: Namespace) -> dict[str, Any]:
-        config = model_config(args.config)
-        run_path = Path(args.run_dir)
-        device = torch.device(args.device)
-        manifest_path = run_path / "manifest.json"
-        if getattr(args, "legacy", False):
-            state = torch.load(
-                run_path / "best.pt", map_location="cpu", weights_only=False
-            )
-            for key in (
-                "hidden",
-                "heads",
-                "blocks",
-                "cond",
-                "dropout",
-                "vocab",
-                "length",
-            ):
-                if key in state["config"] and state["config"][key] != getattr(
-                    config, key
-                ):
-                    raise ValueError(
-                        f"Legacy checkpoint model configuration differs: {key}"
-                    )
-            ema_weights = state["ema"]
-            completed = state["next_step"]
-            checkpoint_fingerprint = state["fingerprint"]
-            data, metadata = load_sudoku(config, args.data_dir)
-            if checkpoint_fingerprint != metadata["fingerprint"]:
-                warnings.warn(
-                    "Legacy checkpoint dataset differs from the current selection; reporting on the current dataset"
-                )
-            tracking = (
-                json.loads(manifest_path.read_text())["wandb"]
-                if manifest_path.exists()
-                else {"mode": "online", "project": "sudoku", "entity": None}
-            )
-        else:
-            state = load_checkpoint(run_path / "best.pt")
-            ema_weights = state["ema"]["model"]
-            completed = state["progress"]["completed_updates"]
-            checkpoint_fingerprint = state["data_fingerprint"]
-            validation_config = SimpleNamespace(
-                **{**vars(config), "max_test_split": state["config"]["max_test_split"]}
-            )
-            data, metadata = load_sudoku(validation_config, args.data_dir)
-            CheckpointManager(
-                run_path,
-                vars(validation_config),
-                metadata["fingerprint"],
-            ).validate(state)
-            if config.max_test_split != validation_config.max_test_split:
-                del data
-                data, metadata = load_sudoku(config, args.data_dir)
-            tracking = json.loads(manifest_path.read_text())["wandb"]
-
-        model = BFN_DIT(config).to(device).eval()
-        model.load_state_dict(ema_weights)
-
-        test = data["test"]
-        results = evaluate_report(model, test, config, device)
-        report = {
-            "by_steps": results,
-            "boards": len(test["questions"]),
-            "seed": TEST_SEED,
-            "sampling_budgets": list(REPORT_STEPS),
-            "checkpoint_step": completed,
-            "max_rating": config.max_rating,
-            "dataset_fingerprint": data_fingerprint({"test": test}),
-            "checkpoint_dataset_fingerprint": checkpoint_fingerprint,
+        reports: dict[str, Report] = {
+            "default": DefaultReport(),
+            "sweep": SweepReport(),
         }
-        (run_path / "sudoku_report.json").write_text(json.dumps(report, indent=2))
-        report_path = run_path / "report" / uuid4().hex
-        report_path.mkdir(parents=True)
-        (report_path / "sudoku_report.json").write_text(json.dumps(report, indent=2))
-
-        tracker = ExperimentTracker(
-            report_path,
-            {**vars(config), "report_steps": list(REPORT_STEPS)},
-            name=args.name or tracking.get("name") or config.objective,
-            mode=args.wandb_mode or tracking["mode"],
-            project=f"{args.project or tracking['project']}-report",
-            entity=args.entity if args.entity is not None else tracking.get("entity"),
-            resume=False,
-        )
-        try:
-            log_report(tracker, completed, results)
-            samples = {steps: result["samples"] for steps, result in results.items()}
-            (run_path / "sudoku_samples.json").write_text(json.dumps(samples, indent=2))
-            (report_path / "sudoku_samples.json").write_text(
-                json.dumps(samples, indent=2)
-            )
-            import wandb
-
-            artifact = wandb.Artifact(
-                f"sudoku-report-{report_path.name}", type="report"
-            )
-            artifact.add_file(str(report_path / "sudoku_report.json"))
-            tracker.run.log_artifact(artifact)
-        except BaseException:
-            tracker.finish(exit_code=1)
-            raise
-        else:
-            tracker.finish()
-        print(
-            json.dumps(
-                {key: value for key, value in report.items() if key != "by_steps"},
-                indent=2,
-            )
-        )
-        return report
+        name = getattr(args, "report", "default")
+        if name not in reports:
+            raise ValueError(f"Unknown Sudoku report: {name}")
+        return reports[name].run(args)
 
     def smoke(self, config: SimpleNamespace) -> None:
         config = model_config(config)
