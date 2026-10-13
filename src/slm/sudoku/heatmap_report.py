@@ -10,7 +10,7 @@ import torch
 
 from slm.common.contracts import Report
 from slm.common.seeds import SAMPLE_SEED
-from slm.slm.core import predict_log_probs, repair_empty, reverse_probs
+from slm.slm.core import predict_log_probs, repair_empty, reverse_probs, survival_ratio
 
 from .data import decode_board
 from .evaluation import sudoku_scores
@@ -57,6 +57,7 @@ def sample_trajectory(model, question, steps, seed=SAMPLE_SEED):
                     "step": 0,
                     "time": 1.0,
                     "earlier_time": None,
+                    "reverse_survival_ratio": None,
                     "before": initial,
                     "sampled": initial,
                     "repaired": initial,
@@ -104,6 +105,9 @@ def sample_trajectory(model, question, steps, seed=SAMPLE_SEED):
                         "step": step,
                         "time": time.item(),
                         "earlier_time": earlier.item(),
+                        "reverse_survival_ratio": survival_ratio(
+                            earlier, time, candidates.shape[-1]
+                        ).item(),
                         "before": candidates[0].cpu().tolist(),
                         "model_probability": clean[0].cpu().tolist(),
                         "retention_probability": retention[0].cpu().tolist(),
@@ -126,6 +130,7 @@ def sample_trajectory(model, question, steps, seed=SAMPLE_SEED):
                     "step": steps + 1,
                     "time": 0.0,
                     "earlier_time": None,
+                    "reverse_survival_ratio": None,
                     "before": final_mask,
                     "sampled": final_mask,
                     "repaired": final_mask,
@@ -223,6 +228,7 @@ class HeatmapReport(Report):
             "checkpoint_dataset_fingerprint": fingerprint,
             "weights": weights,
             "sampling_seed": seed,
+            "sampling_scope": "one board with an independent RNG stream (not a replay of the batched sweep)",
             "sampling_budget": steps,
             "interventions": {
                 "clue_enforcement": True,
@@ -292,27 +298,41 @@ def log_wandb(tracker, completed, data):
                 xname="sampling column (0=initial, N+1=decode)",
             ),
         )
-    kinds = ("clue_enforcement", "constraint_filtering", "empty_set_repair", "other")
+    transitions = [frame for frame in data["frames"] if frame["kind"] == "transition"]
     tracker.artifact(
-        "heatmap/interventions",
+        "heatmap/reverse_survival_ratio",
         wandb.plot.line_series(
-            xs=steps,
-            ys=[
-                [
-                    sum(
-                        len(event["changes"])
-                        for event in frame["events"]
-                        if event["kind"] == kind
-                    )
-                    for frame in data["frames"]
-                ]
-                for kind in kinds
-            ],
-            keys=list(kinds),
-            title="Cells modified by interventions",
-            xname="sampling column (0=initial, N+1=decode)",
+            xs=[frame["step"] for frame in transitions],
+            ys=[[frame["reverse_survival_ratio"] for frame in transitions]],
+            keys=["reverse survival ratio"],
+            title="Reverse survival schedule",
+            xname="sampling transition",
         ),
     )
+    kinds = sorted(
+        {event["kind"] for frame in data["frames"] for event in frame["events"]}
+    )
+    if kinds:
+        tracker.artifact(
+            "heatmap/interventions",
+            wandb.plot.line_series(
+                xs=steps,
+                ys=[
+                    [
+                        sum(
+                            len(event["changes"])
+                            for event in frame["events"]
+                            if event["kind"] == kind
+                        )
+                        for frame in data["frames"]
+                    ]
+                    for kind in kinds
+                ],
+                keys=kinds,
+                title="Cells modified by interventions",
+                xname="sampling column (0=initial, N+1=decode)",
+            ),
+        )
     side = data["vocab"]
     events = [
         [
@@ -406,24 +426,26 @@ def write_html(path: Path, data):
 HTML = r"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Sudoku trajectory heatmap</title><style>
-body{font:14px system-ui,sans-serif;margin:20px;color:#172033;background:#f8fafc}h1,h2{margin:12px 0}section{background:white;border:1px solid #d3dbe7;border-radius:6px;padding:14px;margin:14px 0}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f1f5f9;padding:12px}label{display:inline-block;margin:5px 15px 5px 0}select,input{padding:5px}.boards{display:flex;gap:30px;flex-wrap:wrap}.board{display:grid;gap:1px;background:#64748b;border:2px solid #172033}.board button{width:32px;height:32px;border:0;background:#fff;cursor:pointer;font:16px system-ui}.board .clue{font-weight:bold;background:#e2e8f0}.board .incorrect{color:#b91c1c}.board .selected{box-shadow:inset 0 0 0 3px #f59e0b}.scroll{overflow-x:auto;border:1px solid #cbd5e1;margin:8px 0}canvas{display:block}.legend{display:flex;gap:20px;align-items:center;flex-wrap:wrap}.gradient{display:inline-block;width:130px;height:14px;background:linear-gradient(to right,#fff,#1455c5);border:1px solid #888}.masked{background:repeating-linear-gradient(45deg,#eee 0px,#eee 3px,#aaa 3px,#aaa 4px);padding:3px}.hint{color:#475569}.two{display:grid;grid-template-columns:1fr 1fr;gap:15px}@media(max-width:750px){.two{grid-template-columns:1fr}}
+.scroll{position:relative}.time-cursor{position:absolute;top:0;bottom:0;border:2px solid #f59e0b;box-sizing:border-box;pointer-events:none}
+body{font:14px system-ui,sans-serif;margin:20px;color:#172033;background:#f8fafc}h1,h2{margin:12px 0}section{background:white;border:1px solid #d3dbe7;border-radius:6px;padding:14px;margin:14px 0}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f1f5f9;padding:12px}label{display:inline-block;margin:5px 15px 5px 0}select,input{padding:5px}.boards{display:flex;gap:30px;flex-wrap:wrap}.board{display:grid;gap:1px;background:#64748b;border:2px solid #172033}.board button{width:32px;height:32px;border:0;background:#fff;cursor:pointer;font:16px system-ui}.board .clue{font-weight:bold;background:#e2e8f0}.board .incorrect{color:#b91c1c}.board .selected{box-shadow:inset 0 0 0 3px #f59e0b}.scroll{overflow-x:auto;border:1px solid #cbd5e1;margin:8px 0}canvas{display:block}.legend{display:flex;gap:20px;align-items:center;flex-wrap:wrap}.gradient{display:inline-block;width:130px;height:14px;background:linear-gradient(to right,#fff,#1455c5);border:1px solid #888}.masked{background:repeating-linear-gradient(45deg,#eee 0px,#eee 3px,#aaa 3px,#aaa 4px);padding:3px}.hint{color:#475569}
+.metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px}.metric{background:#eff6ff;border:1px solid #bfdbfe;padding:12px;border-radius:5px}.metric strong,.metric span{display:block}.metric span{font-size:17px;margin-top:5px;overflow-wrap:anywhere}.danger{color:#b91c1c}.good{color:#15803d}.candidate-board{display:grid;gap:2px;background:#334155;border:2px solid #334155;max-width:950px;min-width:450px}.candidate-cell{background:#fff;min-height:90px;padding:7px;cursor:pointer}.candidate-cell.clue{background:#e2e8f0}.candidate-cell.peer{background:#f3e8ff}.candidate-cell.selected{box-shadow:inset 0 0 0 3px #f59e0b}.candidate-cell.lost{border-bottom:3px solid #dc2626}.candidate-cell.lost .cell-caption{color:#b91c1c}.candidate-digits{display:grid;gap:2px;min-height:54px;align-content:center}.candidate-digit{border:1px solid #cbd5e1;border-radius:3px;padding:1px;cursor:pointer;font-size:12px}.candidate-digit.reference{border:2px solid #16a34a}.candidate-digit.decoded{outline:2px solid #f59e0b}.candidate-cell.singleton .candidate-digit{font-size:30px}.cell-caption{font-size:11px;margin:3px 0;overflow-wrap:anywhere}.table-scroll{overflow:auto;max-height:480px}table{border-collapse:collapse;width:100%;font-size:12px}th,td{padding:7px;text-align:left;border:1px solid #cbd5e1;white-space:nowrap}th{background:#e2e8f0;position:sticky;top:0}tr.selected{background:#fff0c2}tr.peer{background:#f3e8ff}tbody tr{cursor:pointer}#stepSlider{width:min(650px,70vw)}details{margin-top:10px}#frameSummary{font-weight:bold}
 </style></head><body>
 <h1>Sudoku sampling trajectory</h1>
-<section><h2>Identity and outcome</h2><pre id="metadata"></pre><div id="boards" class="boards"></div><p class="hint">Red prediction digits disagree with the reference. For an ambiguous puzzle, another valid completion may still solve the board. Reference-loss diagnostics do not prove that all valid completions were eliminated.</p></section>
-<section><h2>Views and failure filters</h2>
-<label>Time view <select id="view"><option value="full">Full: every transition</option><option value="event">Event: changes, interventions and snapshots</option></select></label>
-<label>Snapshot interval <input id="interval" type="number" min="1" value="10" style="width:65px"></label>
+<section><h2>Identity and outcome</h2><pre id="metadata"></pre><div id="boards" class="boards"></div></section>
+<section><h2>Probability and cell filters</h2>
 <label>Probability <select id="mode"><option value="model_probability">Model digit probability (masked, normalized)</option><option value="retention_probability">Sampler retention probability (Bernoulli inclusion)</option></select></label>
 <label><input id="clues" type="checkbox">Show fixed clues</label>
 <label>Cells <select id="filter"><option value="all">All</option><option value="lost">Lost reference digit</option><option value="wrong">Incorrect singleton</option><option value="intervention">Required intervention</option><option value="multiple">Multiple candidates until decoding</option></select></label>
-<p class="hint" id="viewNote"></p><p><b>Timing:</b> color = probability <b>before</b> pruning; borders/counts = candidates <b>after</b> sampling, repair and clue enforcement. Markers describe changes during that column. Initial state is separate; final decoding chooses a digit without changing the candidate set.</p>
-<div class="legend"><span>0% <span class="gradient"></span> 100% (fixed scale)</span><span class="masked">Already eliminated: zero forced by mask</span><span style="color:#dc2626">▲ first reference loss</span><span>▣ singleton / surviving digit border</span><span style="color:#b45309">★ intervention</span><span>— probability not applicable</span><span>✓ final selected digit; compact ✓/× = reference match/mismatch</span></div>
+<p><b>Timing:</b> color = probability <b>before</b> pruning; borders/counts = candidates <b>after</b> sampling, repair and clue enforcement. Initial state is separate; final decoding chooses a digit without changing the candidate set.</p>
+<div class="legend"><span>0 <span class="gradient"></span> 1 (fixed probability scale)</span><span class="masked">Already eliminated: zero forced by mask</span><span style="color:#dc2626">▲ first reference loss</span><span>▣ singleton / surviving digit border</span><span style="color:#b45309">★ intervention</span><span>— probability not applicable</span><span>✓ final selected digit; compact ✓/× = reference match/mismatch</span></div>
 <p id="modeNote" class="hint"></p>
 </section>
-<section><h2>Event strip and actual step/timestep labels</h2><p>Click an intervention marker for affected cells/digits. Blue dots denote ordinary candidate changes, not enforcement. Initial clue enforcement is recorded at initialization. Constraint filtering and other rules are not implemented/enabled in this sampler; unchanged clue clamps are not change events.</p><div id="eventScroll" class="scroll"><canvas id="events"></canvas></div></section>
-<section><h2>Compact overview: reference-digit probability</h2><p>One row per originally blank cell, in board-position order. Numbers are candidate counts after the column; hover/click for before/after counts and exact probabilities. Hatching marks masked zeros after elimination.</p><div id="overviewScroll" class="scroll"><canvas id="overview"></canvas></div><p id="empty"></p></section>
-<section><h2 id="expandedTitle">Expanded candidate view</h2><p>One row per digit. <b>Bold borders</b> mean the digit survives the transition. The reference row is labeled ★. Click a Sudoku cell, overview row or digit box to link the views.</p><div id="expandedScroll" class="scroll"><canvas id="expanded"></canvas></div></section>
-<div class="two"><section><h2>Box inspection</h2><pre id="inspection">Select or hover over a box.</pre></section><section><h2>Intervention details</h2><div id="eventCells"></div><pre id="eventDetails">Select an event marker.</pre></section></div>
+<section><h2>Timeline: timestep and reverse survival ratio</h2><p>Click a column to freeze the whole-board view at that transition. Each label shows actual step, pre-pruning timestep t, and schedule ratio s. The blue line underneath is s on a fixed 0–1 scale; s is a schedule factor, not the observed surviving-cell fraction. Stars appear only for actual forced changes. No empty intervention lanes are shown.</p><div id="timelineScroll" class="scroll"><canvas id="timeline"></canvas><div id="timelineCursor" class="time-cursor"></div></div><details id="stepEvents"><summary>Actual forced changes at the selected step</summary><div id="eventCells"></div><pre id="eventDetails"></pre></details></section>
+<section><h2>Compact overview: reference-digit probability</h2><p>One row per originally blank cell, in board-position order. Numbers are candidate counts after the column; hover/click for before/after counts and exact probabilities. Hatching marks masked zeros after elimination.</p><div id="overviewScroll" class="scroll"><canvas id="overview"></canvas><div id="overviewCursor" class="time-cursor"></div></div><p id="empty"></p></section>
+<section><h2 id="expandedTitle">Expanded candidate view</h2><p>One row per digit. <b>Bold borders</b> mean the digit survives the transition. The reference row is labeled ★. Click a Sudoku cell, overview row or digit box to link the views.</p><div id="expandedScroll" class="scroll"><canvas id="expanded"></canvas><div id="expandedCursor" class="time-cursor"></div></div></section>
+<section><h2>Box inspection</h2><label><input id="pin" type="checkbox">Pin inspection (clicking a box pins it)</label><p class="hint">Hover previews a single box without moving the board's selected time. Click a box to pin it and synchronize the board below. Uncheck Pin to resume hover previews.</p><div id="inspection"></div><details><summary>Intermediate candidate sets and actual interventions</summary><pre id="inspectionDetails"></pre></details></section>
+<section><h2>Whole-board candidates through time</h2><label>Time <input id="stepSlider" type="range" min="0" step="1" value="0"></label><button id="previousStep">Previous</button> <button id="nextStep">Next</button><p id="frameLabel"></p><label>Candidate state <select id="stage"><option value="after">After transition</option><option value="before">Before transition</option></select></label><p id="frameSummary"></p><p>Each cell shows all candidates at the selected state; the sets shrink and singletons become large digits. n = candidate count, −/+ = removed/added counts, ★ = actual forced change. Cell positions stay fixed. Colors still use probabilities <b>before</b> the selected transition. Green digit border = reference; gold = final decoded digit. Purple cells share the selected cell's row, column or box (structural peers, not all attention connections).</p><div class="scroll"><div id="candidateBoard" class="candidate-board"></div></div>
+<h3>Cross-cell comparison at this time</h3><label>Probability target <select id="compareTarget"><option value="reference">Reference digit in each cell</option><option value="selected">Selected digit across all cells</option></select></label><label><input id="changedOnly" type="checkbox">Only changed/intervened cells</label><p id="compareScope"></p><div class="table-scroll"><table><thead><tr><th>Cell</th><th>Target</th><th>Before candidates</th><th>After candidates</th><th>Removed / added</th><th>Model p before</th><th>Retention q</th><th>Model p next call</th><th>Δ model p</th></tr></thead><tbody id="comparisonRows"></tbody></table></div></section>
 <script id="trajectory" type="application/json">__TRAJECTORY_DATA__</script>
 <script>
 'use strict';
@@ -431,13 +453,12 @@ const D=JSON.parse(document.getElementById('trajectory').textContent), F=D.frame
 const $=id=>document.getElementById(id), cellName=c=>'r'+(Math.floor(c/side)+1)+'c'+(c%side+1), digits=m=>m.flatMap((v,i)=>v?[i+1]:[]);
 let selected=D.question.findIndex(v=>v<0), selectedColumn=0, selectedDigit=0, columns=[], rows=[], width=20;
 if(selected<0)selected=0;selectedDigit=D.reference[selected];
-const labelWidth=140, rowHeight=24, kinds=['clue_enforcement','constraint_filtering','empty_set_repair','other'];
-const eventColors=['#16a34a','#7c3aed','#e8790c','#be185d'];
+const labelWidth=140, rowHeight=24;
+columns=F.map((_,i)=>i);
 $('metadata').textContent=JSON.stringify({...D.metadata,scores:D.scores},null,2);
-$('interval').value=Math.max(1,Math.floor(D.metadata.sampling_budget/20));
+$('stepSlider').max=F.length-1;
 function matches(c){const a=D.cells[c], f=$('filter').value;return f==='all'||f==='lost'&&a.first_loss!==null||f==='wrong'&&a.wrong_singleton!==null||f==='intervention'&&a.interventions.length>0||f==='multiple'&&a.multiple_until_decode}
-function changed(f){return f.events.length>0||f.before.some((m,c)=>m.some((v,d)=>v!==f.after[c][d]||v!==f.sampled[c][d]))}
-function columnLabel(f){return f.kind==='initial'?'initial t=1':f.kind==='decode'?'decode t=0':'s'+f.step+' t='+f.time.toFixed(5)}
+function columnLabel(f){return f.kind==='initial'?'initial t=1 s=—':f.kind==='decode'?'decode t=0 s=—':'step '+f.step+' t='+f.time.toFixed(4)+' s='+f.reverse_survival_ratio.toFixed(4)}
 function cellEvents(f,c,d=null){return f.events.flatMap(e=>e.changes.filter(a=>a.cell===c&&(d===null||a.added.includes(d+1)||a.removed.includes(d+1))).map(a=>({kind:e.kind,...a})))}
 function mechanisms(f,c,d){
  if(f.kind==='initial')return D.question[c]>=0?['Initial clue enforcement']:['Initial unrestricted blank'];
@@ -449,10 +470,42 @@ function mechanisms(f,c,d){
  if(f.repaired[c][d]!==f.after[c][d])result.push('Changed by clue enforcement');
  return result;
 }
-function inspect(fi,c,d){const f=F[fi], p=f.model_probability?.[c][d], r=f.retention_probability?.[c][d];
- $('inspection').textContent=JSON.stringify({cell:cellName(c),digit:d+1,reference:D.reference[c]+1,column:fi,kind:f.kind,step:f.step,time_before:f.time,time_after:f.earlier_time,model_digit_probability:p??'not applicable',model_percent:p===undefined?'not applicable':p*100,sampler_retention_probability:r??'not applicable',retention_percent:r===undefined?'not applicable':r*100,uniform_draw:f.draws?.[c][d]??'not applicable',candidate_before:f.before[c][d],after_sampling:f.sampled[c][d],after_repair:f.repaired[c][d],candidate_after:f.after[c][d],candidate_count_before:digits(f.before[c]).length,candidate_count_after:digits(f.after[c]).length,candidates_before:digits(f.before[c]),candidates_after:digits(f.after[c]),change_mechanism:mechanisms(f,c,d),interventions:cellEvents(f,c),reference_first_eliminated_column:D.cells[c].first_loss,final_digit:D.prediction[c]+1},null,2);
+function inspectionData(fi,c,d){
+ const f=F[fi];
+ return {cell:cellName(c),digit:d+1,reference:D.reference[c]+1,step:f.step,kind:f.kind,
+  time_before:f.time,time_after:f.earlier_time,reverse_survival_ratio:f.reverse_survival_ratio,
+  model_digit_probability:f.model_probability?.[c][d]??null,
+  sampler_retention_probability:f.retention_probability?.[c][d]??null,
+  uniform_draw:f.draws?.[c][d]??null,candidate_before:f.before[c][d],candidate_after:f.after[c][d],
+  candidates_before:digits(f.before[c]),candidates_after:digits(f.after[c]),
+  change_mechanism:mechanisms(f,c,d),final_digit:D.prediction[c]+1};
 }
-function boardCell(c){selected=c;selectedDigit=D.reference[c];if(D.question[c]>=0)$('clues').checked=true;if(!matches(c))$('filter').value='all';render();inspect(selectedColumn,c,selectedDigit)}
+function metric(root,label,value){
+ const card=document.createElement('div');card.className='metric';
+ const title=document.createElement('strong');title.textContent=label;
+ const text=document.createElement('span');text.textContent=value===null||value===undefined?'Not applicable':String(value);
+ card.appendChild(title);card.appendChild(text);root.appendChild(card);
+}
+function inspect(fi,c,d){
+ const f=F[fi],info=inspectionData(fi,c,d),root=$('inspection');root.replaceChildren();
+ const title=document.createElement('h3');title.textContent=info.cell+' · digit '+info.digit+' (reference '+info.reference+') · '+columnLabel(f);root.appendChild(title);
+ const cards=document.createElement('div');cards.className='metrics';
+ metric(cards,'Model digit probability p',info.model_digit_probability);
+ metric(cards,'Sampler retention probability q',info.sampler_retention_probability);
+ metric(cards,'Uniform draw u (kept if u < q)',info.uniform_draw);
+ metric(cards,'Candidate status',(info.candidate_before?'Available':'Excluded')+' → '+(info.candidate_after?'available':'excluded'));
+ root.appendChild(cards);
+ const sets=document.createElement('p');sets.textContent='Candidates ('+info.candidates_before.length+' → '+info.candidates_after.length+'): ['+info.candidates_before.join(', ')+'] → ['+info.candidates_after.join(', ')+']';root.appendChild(sets);
+ const mechanism=document.createElement('strong');mechanism.className=info.candidate_before&&!info.candidate_after?'danger':'';mechanism.textContent=info.change_mechanism.join('; ');root.appendChild(mechanism);
+ const refState=document.createElement('p');refState.className=f.after[c][D.reference[c]]?'good':'danger';
+ refState.textContent=f.after[c][D.reference[c]]?'Reference digit still available.':'Reference digit lost; first elimination at step '+D.cells[c].first_loss+'.';root.appendChild(refState);
+ $('inspectionDetails').textContent=JSON.stringify({time_before:info.time_before,time_after:info.time_after,
+  reverse_survival_ratio:info.reverse_survival_ratio,after_sampling:digits(f.sampled[c]),
+  after_repair:digits(f.repaired[c]),interventions:cellEvents(f,c),final_digit:info.final_digit},null,2);
+}
+function selectCell(c,d=D.reference[c]){selected=c;selectedDigit=d;if(D.question[c]>=0)$('clues').checked=true;if(!matches(c))$('filter').value='all';$('pin').checked=true;render();inspect(selectedColumn,c,d)}
+function boardCell(c){selectCell(c,$('compareTarget').value==='selected'?selectedDigit:D.reference[c])}
+function selectTime(fi){selectedColumn=Math.max(0,Math.min(F.length-1,fi));moveCursors();drawWholeBoard();showEvents(selectedColumn);inspect(selectedColumn,selected,selectedDigit)}
 function drawBoards(){const root=$('boards');root.replaceChildren();[['Original puzzle',D.question],['Reference solution',D.reference],['Final prediction',D.prediction]].forEach(([title,values],boardIndex)=>{
  const wrap=document.createElement('div'), heading=document.createElement('h3');heading.textContent=title;wrap.appendChild(heading);const board=document.createElement('div');board.className='board';board.style.gridTemplateColumns='repeat('+side+',32px)';const box=Math.sqrt(side);
  values.forEach((v,c)=>{const b=document.createElement('button');b.textContent=v<0?'·':v+1;b.title=cellName(c)+' (cell '+c+')';if(D.question[c]>=0)b.classList.add('clue');if(boardIndex===2&&v!==D.reference[c])b.classList.add('incorrect');if(c===selected)b.classList.add('selected');if((c%side+1)%box===0&&c%side<side-1)b.style.borderRight='2px solid #172033';if((Math.floor(c/side)+1)%box===0&&Math.floor(c/side)<side-1)b.style.borderBottom='2px solid #172033';b.onclick=()=>boardCell(c);board.appendChild(b)});wrap.appendChild(board);root.appendChild(wrap)
@@ -467,16 +520,68 @@ function paint(ctx,x,y,c,d,f,compact){const p=f[$('mode').value]?.[c][d];const m
  if(f.kind==='decode'&&width>=12&&(compact||f.decoded[c]===d)){ctx.fillStyle='#172033';ctx.fillText(f.decoded[c]===d?'✓':'×',x+2,y+22)}
  marker(ctx,x,y,c,f,d,compact);
 }
-function highlight(ctx,height){const i=columns.indexOf(selectedColumn);if(i>=0){ctx.strokeStyle='#f59e0b';ctx.lineWidth=2;ctx.strokeRect(labelWidth+i*width+1,1,width-2,height-2)}}
-function drawOverview(){const ctx=prepare($('overview'),Math.max(30,rows.length*rowHeight));rows.forEach((c,r)=>{const y=r*rowHeight;ctx.fillStyle=c===selected?'#fff0c2':'#f1f5f9';ctx.fillRect(0,y,labelWidth,rowHeight);ctx.fillStyle='#172033';ctx.fillText(cellName(c)+' ref '+(D.reference[c]+1)+(D.question[c]>=0?' [clue]':''),5,y+17);columns.forEach((fi,i)=>paint(ctx,labelWidth+i*width,y,c,D.reference[c],F[fi],true));if(c===selected){ctx.strokeStyle='#f59e0b';ctx.lineWidth=2;ctx.strokeRect(1,y+1,$('overview').width-2,rowHeight-2)}});highlight(ctx,$('overview').height);$('empty').textContent=rows.length?'':'No cells match this filter.'}
-function drawExpanded(){const ctx=prepare($('expanded'),side*rowHeight);$('expandedTitle').textContent='Expanded '+cellName(selected)+' — reference digit '+(D.reference[selected]+1);for(let d=0;d<side;d++){const y=d*rowHeight;ctx.fillStyle=d===D.reference[selected]?'#fef3c7':'#f1f5f9';ctx.fillRect(0,y,labelWidth,rowHeight);ctx.fillStyle='#172033';ctx.fillText((d===D.reference[selected]?'★ reference ':'digit ')+(d+1),5,y+17);columns.forEach((fi,i)=>paint(ctx,labelWidth+i*width,y,selected,d,F[fi],false))}highlight(ctx,$('expanded').height)}
-function drawEvents(){const ctx=prepare($('events'),240);kinds.forEach((kind,r)=>{ctx.fillStyle=eventColors[r];ctx.fillText(kind.replaceAll('_',' '),3,160+r*18)});columns.forEach((fi,i)=>{const x=labelWidth+i*width,f=F[fi];ctx.save();ctx.translate(x+width/2,150);ctx.rotate(-Math.PI/2);ctx.fillStyle='#172033';ctx.fillText(columnLabel(f),0,0);ctx.restore();kinds.forEach((kind,r)=>{if(f.events.some(e=>e.kind===kind)){ctx.fillStyle=eventColors[r];ctx.fillRect(x+2,152+r*18,Math.max(2,width-4),14)}});if(f.kind==='transition'&&changed(f)){ctx.fillStyle='#2563eb';ctx.beginPath();ctx.arc(x+width/2,232,2,0,Math.PI*2);ctx.fill()}});highlight(ctx,240)}
-function showEvents(fi){const f=F[fi];$('eventDetails').textContent=JSON.stringify({column:fi,label:columnLabel(f),events:f.events,ordinary_sampling_is_not_an_intervention:true},null,2);const root=$('eventCells');root.replaceChildren();const cells=[...new Set(f.events.flatMap(e=>e.changes.map(a=>a.cell)))];cells.forEach(c=>{const b=document.createElement('button');b.textContent=cellName(c);b.onclick=()=>boardCell(c);root.appendChild(b)})}
-function render(){const event=$('view').value==='event',interval=Math.max(1,parseInt($('interval').value)||1);columns=F.map((f,i)=>i).filter(i=>!event||i===0||i===F.length-1||F[i].step%interval===0||changed(F[i]));rows=D.cells.filter(a=>($('clues').checked||!a.clue)&&matches(a.cell)).map(a=>a.cell);width=Math.max(4,Math.min(24,Math.floor(24000/columns.length)));$('viewNote').textContent=event?'Event columns are equally spaced visually, but do NOT represent equal time intervals. Labels retain actual steps and timesteps.':'Every sampling transition is shown, preceded by initial state and followed by final decoding.';$('modeNote').textContent=$('mode').value==='model_probability'?'Model digit probability: masked and normalized across currently available digits. Hatching distinguishes mask-forced zeros from predictions before elimination.':'Sampler retention probability: independent Bernoulli inclusion probability for this transition; it is NOT a normalized distribution across digits. Not applicable at initialization or final decoding.';drawBoards();drawEvents();drawOverview();drawExpanded()}
+function moveCursors(){['timelineCursor','overviewCursor','expandedCursor'].forEach(id=>{$(id).style.left=(labelWidth+selectedColumn*width)+'px';$(id).style.width=width+'px'})}
+function drawOverview(){const ctx=prepare($('overview'),Math.max(30,rows.length*rowHeight));rows.forEach((c,r)=>{const y=r*rowHeight;ctx.fillStyle=c===selected?'#fff0c2':'#f1f5f9';ctx.fillRect(0,y,labelWidth,rowHeight);ctx.fillStyle='#172033';ctx.fillText(cellName(c)+' ref '+(D.reference[c]+1)+(D.question[c]>=0?' [clue]':''),5,y+17);columns.forEach((fi,i)=>paint(ctx,labelWidth+i*width,y,c,D.reference[c],F[fi],true));if(c===selected){ctx.strokeStyle='#f59e0b';ctx.lineWidth=2;ctx.strokeRect(1,y+1,$('overview').width-2,rowHeight-2)}});$('empty').textContent=rows.length?'':'No cells match this filter.'}
+function drawExpanded(){const ctx=prepare($('expanded'),side*rowHeight);$('expandedTitle').textContent='Expanded '+cellName(selected)+' — reference digit '+(D.reference[selected]+1);for(let d=0;d<side;d++){const y=d*rowHeight;ctx.fillStyle=d===D.reference[selected]?'#fef3c7':'#f1f5f9';ctx.fillRect(0,y,labelWidth,rowHeight);ctx.fillStyle='#172033';ctx.fillText((d===D.reference[selected]?'★ reference ':'digit ')+(d+1),5,y+17);columns.forEach((fi,i)=>paint(ctx,labelWidth+i*width,y,selected,d,F[fi],false))}}
+function drawTimeline(){
+ const ctx=prepare($('timeline'),240);ctx.fillStyle='#172033';ctx.fillText('reverse survival s',3,212);
+ columns.forEach((fi,i)=>{const x=labelWidth+i*width,f=F[fi];ctx.save();ctx.translate(x+width/2,178);ctx.rotate(-Math.PI/2);ctx.fillText(columnLabel(f),0,0);ctx.restore();if(f.events.length){ctx.fillStyle='#b45309';ctx.fillText('★',x+1,237);ctx.fillStyle='#172033'}});
+ ctx.strokeStyle='#2563eb';ctx.lineWidth=2;ctx.beginPath();let started=false;
+ columns.forEach((fi,i)=>{const s=F[fi].reverse_survival_ratio;if(s===null)return;const x=labelWidth+(i+.5)*width,y=225-35*s;if(!started){ctx.moveTo(x,y);started=true}else ctx.lineTo(x,y)});ctx.stroke();
+}
+function showEvents(fi){
+ const f=F[fi];$('stepEvents').hidden=f.events.length===0;
+ $('eventDetails').textContent=JSON.stringify(f.events,null,2);
+ const root=$('eventCells');root.replaceChildren();
+ [...new Set(f.events.flatMap(e=>e.changes.map(a=>a.cell)))].forEach(c=>{const b=document.createElement('button');b.textContent=cellName(c);b.onclick=()=>boardCell(c);root.appendChild(b)});
+}
+function peer(c){const box=Math.sqrt(side);return Math.floor(c/side)===Math.floor(selected/side)||c%side===selected%side||Math.floor(c/side/box)===Math.floor(selected/side/box)&&Math.floor(c%side/box)===Math.floor(selected%side/box)}
+function targetDigit(c){return $('compareTarget').value==='selected'?selectedDigit:D.reference[c]}
+function probabilityText(value){return value===null||value===undefined?'—':Number(value.toPrecision(6)).toString()}
+function comparisonData(fi,c){
+ const f=F[fi],d=targetDigit(c),p=f.model_probability?.[c][d]??null,next=F[fi+1]?.model_probability?.[c][d]??null;
+ return {cell:c,target:d+1,before:digits(f.before[c]),after:digits(f.after[c]),
+  removed:digits(f.before[c].map((v,i)=>v&&!f.after[c][i])),added:digits(f.after[c].map((v,i)=>v&&!f.before[c][i])),
+  model_probability:p,retention_probability:f.retention_probability?.[c][d]??null,
+  next_model_probability:next,delta:p===null||next===null?null:next-p};
+}
+function drawWholeBoard(){
+ const f=F[selectedColumn],state=f[$('stage').value==='before'?'before':'after'];
+ $('stepSlider').value=selectedColumn;$('frameLabel').textContent=columnLabel(f)+' · '+$('stage').value+' candidate state';
+ const blanks=D.cells.filter(a=>!a.clue).map(a=>a.cell),n=blanks.length;
+ const alive=blanks.filter(c=>f.after[c][D.reference[c]]).length,singletons=blanks.filter(c=>digits(f.after[c]).length===1).length;
+ const changedCells=blanks.filter(c=>f.before[c].some((v,d)=>v!==f.after[c][d])).length;
+ $('frameSummary').textContent=(f.kind==='initial'?'Initialized state: ':f.kind==='decode'?'Decoding (candidate mask unchanged): ':'After transition: ')+'reference present in '+alive+'/'+n+' blank cells; '+singletons+' singletons; '+changedCells+' blank cells changed.';
+ const root=$('candidateBoard');root.replaceChildren();root.style.gridTemplateColumns='repeat('+side+',1fr)';root.style.minWidth=(side*90+2*(side-1))+'px';root.style.maxWidth=(side*106+2*(side-1))+'px';const box=Math.sqrt(side);
+ state.forEach((mask,c)=>{
+  const tile=document.createElement('div');tile.className='candidate-cell';
+  if(D.question[c]>=0)tile.classList.add('clue');if(peer(c)&&c!==selected)tile.classList.add('peer');if(c===selected)tile.classList.add('selected');if(!mask[D.reference[c]])tile.classList.add('lost');
+  if((c%side+1)%box===0&&c%side<side-1)tile.style.borderRight='3px solid #334155';if((Math.floor(c/side)+1)%box===0&&Math.floor(c/side)<side-1)tile.style.borderBottom='3px solid #334155';
+  const caption=document.createElement('div');caption.className='cell-caption';caption.textContent=cellName(c)+(D.question[c]>=0?' · clue':' · n='+digits(mask).length);tile.appendChild(caption);
+  const grid=document.createElement('div');grid.className='candidate-digits';const remaining=digits(mask);grid.style.gridTemplateColumns='repeat('+Math.max(1,Math.min(box,Math.ceil(Math.sqrt(remaining.length))))+',1fr)';
+  if(remaining.length===1)tile.classList.add('singleton');
+  remaining.forEach(digit=>{const d=digit-1,b=document.createElement('button');b.className='candidate-digit';b.textContent=digit;
+   const p=f[$('mode').value]?.[c][d];if(p!==undefined){b.style.background='rgb('+Math.round(255-235*p)+','+Math.round(255-170*p)+','+Math.round(255-58*p)+')';b.style.color=p>.65?'white':'#172033'}
+   if(d===D.reference[c])b.classList.add('reference');if(f.kind==='decode'&&d===D.prediction[c])b.classList.add('decoded');
+   b.title=cellName(c)+' digit '+digit;b.onclick=e=>{e.stopPropagation();selectCell(c,d)};grid.appendChild(b)});
+  tile.appendChild(grid);const delta=comparisonData(selectedColumn,c),footer=document.createElement('div');footer.className='cell-caption';footer.textContent='ref '+(D.reference[c]+1)+(delta.removed.length?' · −'+delta.removed.length:'')+(delta.added.length?' · +'+delta.added.length:'')+(cellEvents(f,c).length?' ★':'');tile.appendChild(footer);tile.onclick=()=>boardCell(c);root.appendChild(tile);
+ });
+ $('compareScope').textContent=$('compareTarget').value==='selected'?'Target: selected digit '+(selectedDigit+1)+' in every cell.':'Target: each cell’s own reference digit.';
+ const tbody=$('comparisonRows');tbody.replaceChildren();
+ D.cells.forEach(cell=>{const c=cell.cell,a=comparisonData(selectedColumn,c);if($('changedOnly').checked&&!a.removed.length&&!a.added.length&&!cellEvents(f,c).length)return;
+  const row=document.createElement('tr');if(c===selected)row.className='selected';else if(peer(c))row.className='peer';
+  const values=[cellName(c)+(cell.clue?' [clue]':''),a.target,a.before.join(','),a.after.join(','),'-['+a.removed.join(',')+'] / +['+a.added.join(',')+']',probabilityText(a.model_probability),probabilityText(a.retention_probability),probabilityText(a.next_model_probability),probabilityText(a.delta)];
+  values.forEach((value,i)=>{const td=document.createElement('td');td.textContent=value;if(i>=5)td.title=String([a.model_probability,a.retention_probability,a.next_model_probability,a.delta][i-5]??'Not applicable');if(i===8&&a.delta!==null)td.className=a.delta<0?'danger':'good';row.appendChild(td)});row.onclick=()=>boardCell(c);tbody.appendChild(row);
+ });
+}
+function render(){rows=D.cells.filter(a=>($('clues').checked||!a.clue)&&matches(a.cell)).map(a=>a.cell);width=Math.max(4,Math.min(24,Math.floor(24000/columns.length)));$('modeNote').textContent=$('mode').value==='model_probability'?'Color is the model probability of the reference digit in the overview, or the row’s digit in the expanded view. Dark blue = high predicted probability; gray hatching = excluded by the mask.':'Color is the chance that this candidate survives this one transition. Dark blue early is expected for nearly all digits because s is high; it does NOT indicate a selected answer or model confidence. Retention is undefined at initialization and decoding.';drawBoards();drawTimeline();drawOverview();drawExpanded();moveCursors();drawWholeBoard();showEvents(selectedColumn)}
 function hit(canvas,event){const rect=canvas.getBoundingClientRect(),x=(event.clientX-rect.left)*canvas.width/rect.width,y=(event.clientY-rect.top)*canvas.height/rect.height;return {fi:columns[Math.floor((x-labelWidth)/width)],row:Math.floor(y/rowHeight)}}
-['overview','expanded'].forEach(id=>{const canvas=$(id);canvas.onmousemove=e=>{const h=hit(canvas,e),c=id==='overview'?rows[h.row]:selected,d=id==='overview'?D.reference[c]:h.row;if(h.fi!==undefined&&c!==undefined&&d>=0&&d<side)inspect(h.fi,c,d)};canvas.onclick=e=>{const h=hit(canvas,e);if(h.fi===undefined)return;const c=id==='overview'?rows[h.row]:selected,d=id==='overview'?D.reference[c]:h.row;if(c===undefined||d<0||d>=side)return;selected=c;selectedDigit=d;selectedColumn=h.fi;render();inspect(h.fi,c,d);showEvents(h.fi)}});
-$('events').onclick=e=>{const h=hit($('events'),e);if(h.fi===undefined)return;selectedColumn=h.fi;render();showEvents(h.fi);inspect(h.fi,selected,selectedDigit)};
-['view','interval','mode','clues','filter'].forEach(id=>$(id).addEventListener('change',()=>{render();inspect(selectedColumn,selected,selectedDigit)}));
-let syncing=false;['eventScroll','overviewScroll','expandedScroll'].forEach(id=>$(id).addEventListener('scroll',()=>{if(syncing)return;syncing=true;['eventScroll','overviewScroll','expandedScroll'].filter(other=>other!==id).forEach(other=>$(other).scrollLeft=$(id).scrollLeft);syncing=false}));
-render();inspect(0,selected,selectedDigit);showEvents(0);
+['overview','expanded'].forEach(id=>{const canvas=$(id);canvas.onmousemove=e=>{if($('pin').checked)return;const h=hit(canvas,e),c=id==='overview'?rows[h.row]:selected,d=id==='overview'?D.reference[c]:h.row;if(h.fi!==undefined&&c!==undefined&&d>=0&&d<side)inspect(h.fi,c,d)};canvas.onclick=e=>{const h=hit(canvas,e);if(h.fi===undefined)return;const c=id==='overview'?rows[h.row]:selected,d=id==='overview'?D.reference[c]:h.row;if(c===undefined||d<0||d>=side)return;selectedColumn=h.fi;selectCell(c,d)}});
+$('timeline').onclick=e=>{const h=hit($('timeline'),e);if(h.fi!==undefined)selectTime(h.fi)};
+$('stepSlider').oninput=()=>selectTime(Number($('stepSlider').value));
+$('previousStep').onclick=()=>selectTime(selectedColumn-1);$('nextStep').onclick=()=>selectTime(selectedColumn+1);
+['mode','clues','filter'].forEach(id=>$(id).addEventListener('change',()=>{render();inspect(selectedColumn,selected,selectedDigit)}));
+['stage','compareTarget','changedOnly'].forEach(id=>$(id).addEventListener('change',()=>{drawWholeBoard();inspect(selectedColumn,selected,selectedDigit)}));
+let syncing=false;['timelineScroll','overviewScroll','expandedScroll'].forEach(id=>$(id).addEventListener('scroll',()=>{if(syncing)return;syncing=true;['timelineScroll','overviewScroll','expandedScroll'].filter(other=>other!==id).forEach(other=>$(other).scrollLeft=$(id).scrollLeft);syncing=false}));
+render();inspect(0,selected,selectedDigit);
 </script></body></html>"""
