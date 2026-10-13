@@ -152,7 +152,7 @@ class SweepReport(Report):
         return report
 
 
-def _load_report(args: Namespace):
+def _load_report(args: Namespace, weights="ema"):
     from .run import model_config
 
     config = model_config(args.config)
@@ -166,7 +166,7 @@ def _load_report(args: Namespace):
                 raise ValueError(
                     f"Legacy checkpoint model configuration differs: {key}"
                 )
-        ema_weights = state["ema"]
+        model_weights = state["ema"] if weights == "ema" else state["model"]
         completed = state["next_step"]
         checkpoint_fingerprint = state["fingerprint"]
         data, metadata = load_sudoku(config, args.data_dir)
@@ -181,7 +181,7 @@ def _load_report(args: Namespace):
         )
     else:
         state = load_checkpoint(run_path / "best.pt")
-        ema_weights = state["ema"]["model"]
+        model_weights = state["ema"]["model"] if weights == "ema" else state["model"]
         completed = state["progress"]["completed_updates"]
         checkpoint_fingerprint = state["data_fingerprint"]
         validation_config = SimpleNamespace(
@@ -197,7 +197,7 @@ def _load_report(args: Namespace):
         tracking = json.loads(manifest_path.read_text())["wandb"]
 
     model = BFN_DIT(config).to(device).eval()
-    model.load_state_dict(ema_weights)
+    model.load_state_dict(model_weights)
     return config, model, data["test"], completed, checkpoint_fingerprint, tracking
 
 

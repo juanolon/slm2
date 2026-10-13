@@ -22,6 +22,7 @@ from .data import (
 )
 from .evaluation import SudokuEvaluator
 from .report import DefaultReport, SweepReport
+from .heatmap_report import HeatmapReport
 from .task import SudokuTask
 
 SUDOKU_TRAINING_FIELDS = (
@@ -142,6 +143,7 @@ class Runner(TaskRunner):
         reports: dict[str, Report] = {
             "default": DefaultReport(),
             "sweep": SweepReport(),
+            "heatmap": HeatmapReport(),
         }
         name = getattr(args, "report", "default")
         if name not in reports:

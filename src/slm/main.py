@@ -80,12 +80,16 @@ def build_report_command(commands):
     text8, sudoku = add_tasks(parser)
     text8.add_argument("--report", choices=("default",), default="default")
     sudoku.add_argument(
-        "--report", choices=("default", "sweep"), default="default",
-        help="Report implementation: single-budget default or six-budget sweep",
+        "--report", choices=("default", "sweep", "heatmap"), default="default",
+        help="Report implementation: basic, sampling sweep, or one-board heatmap",
     )
     sudoku.add_argument(
         "--legacy", action="store_true", help="Load a legacy notebook Sudoku checkpoint"
     )
+    sudoku.add_argument("--board-id", type=int, default=0, help="Heatmap: zero-based index in the selected test split")
+    sudoku.add_argument("--weights", choices=("ema", "raw"), default="ema", help="Heatmap: checkpoint weights to inspect")
+    sudoku.add_argument("--sampling-seed", type=int, help="Heatmap: sampling seed (defaults to SAMPLE_SEED)")
+    sudoku.add_argument("--sampling-steps", type=positive_int, help="Heatmap: sampling budget (defaults to report_steps or sample_steps)")
 
 
 def build_smoke_command(commands):
