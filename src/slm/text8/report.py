@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from argparse import Namespace
 from pathlib import Path
 from typing import Any
@@ -10,6 +11,7 @@ import torch
 
 from slm.common.checkpoint import CheckpointManager, load_checkpoint
 from slm.common.contracts import Report
+from slm.common.reporting import sampling_settings
 from slm.common.seeds import SAMPLE_SEED, TEST_SEED, VALIDATION_SEED
 from slm.common.tracking import ExperimentTracker
 from slm.slm.backbone import BFN_DIT
@@ -21,10 +23,36 @@ from .evaluation import evaluate_stream, generate
 SAMPLE_NFE = 1000
 
 
+def average_evaluations(results):
+    if len(results) == 1:
+        return results[0]
+    count = len(results)
+    mean = sum(result["bpc"] for result in results) / count
+    combined = {
+        **results[0],
+        "bpc": mean,
+        # Independent repeats include both window selection and MC randomness.
+        "mc_se": math.sqrt(
+            sum((result["bpc"] - mean) ** 2 for result in results) / (count * (count - 1))
+        ),
+    }
+    if "window_seed" in combined:
+        combined["window_seed_list"] = [result["window_seed"] for result in results]
+    if "draw_scores" in combined:
+        combined["draw_scores"] = [
+            sum(result["draw_scores"][i] for result in results) / count
+            for i in range(len(combined["draw_scores"]))
+        ]
+    return combined
+
+
 class DefaultReport(Report):
     def run(self, args: Namespace) -> dict[str, Any]:
         from .run import model_config
 
+        sampling = sampling_settings(args, TEST_SEED)
+        validation_seeds = sampling_settings(args, VALIDATION_SEED)["sampling_seed_list"]
+        sample_seeds = sampling_settings(args, SAMPLE_SEED)["sampling_seed_list"]
         config = model_config(args.config)
         settings = args.config.text8
         run_path = Path(args.run_dir)
@@ -39,37 +67,43 @@ class DefaultReport(Report):
         tracking = json.loads((run_path / "manifest.json").read_text())["wandb"]
         draws, windows = settings["draws"], settings["windows"]
 
-        validation = evaluate_stream(
-            model,
-            valid,
-            config,
-            windows or len(valid) // config.length,
-            draws,
-            seed=VALIDATION_SEED,
-        )
-        testing = evaluate_stream(
-            model,
-            test,
-            config,
-            windows or len(test) // config.length,
-            draws,
-            seed=TEST_SEED,
-        )
+        by_seed = [
+            {
+                "seed": seed,
+                "validation_seed": validation_seed,
+                "validation": evaluate_stream(
+                    model, valid, config, windows or len(valid) // config.length,
+                    draws, seed=validation_seed,
+                ),
+                "test": evaluate_stream(
+                    model, test, config, windows or len(test) // config.length,
+                    draws, seed=seed,
+                ),
+            }
+            for seed, validation_seed in zip(sampling["sampling_seed_list"], validation_seeds)
+        ]
+        validation = average_evaluations([run["validation"] for run in by_seed])
+        testing = average_evaluations([run["test"] for run in by_seed])
         report = {
             "checkpoint_step": completed,
+            **sampling,
+            "validation_seed_list": validation_seeds,
+            "sample_seed_list": sample_seeds,
             "objective": config.objective,
             "config": vars(config),
             "data_fingerprint": fingerprint,
             "validation": validation,
             "test": testing,
         }
+        if len(by_seed) > 1:
+            report["by_seed"] = by_seed
         (run_path / "final_report.json").write_text(json.dumps(report, indent=2))
         report_path = run_path / "report" / uuid4().hex
         report_path.mkdir(parents=True)
         (report_path / "final_report.json").write_text(json.dumps(report, indent=2))
         tracker = ExperimentTracker(
             report_path,
-            vars(config),
+            {**vars(config), **sampling},
             name=args.name or tracking.get("name") or config.objective,
             mode=args.wandb_mode or tracking["mode"],
             project=f"{args.project or tracking['project']}-report",
@@ -88,26 +122,28 @@ class DefaultReport(Report):
             tracker.run.summary["final_test_bpc"] = testing["bpc"]
             tracker.run.summary["final_test_mc_se"] = testing["mc_se"]
             tracker.run.summary["selected_checkpoint_step"] = completed
-            seed_all(SAMPLE_SEED)
-            tokens = generate(
-                model,
-                4,
-                config.length,
-                config.vocab,
-                steps=SAMPLE_NFE - 1,
-                device=device,
-            )
-            texts = [
-                "".join(ALPHABET[token] for token in row)
-                for row in tokens.cpu().tolist()
-            ]
+            texts, sample_rows = [], []
+            for seed in sample_seeds:
+                seed_all(seed)
+                tokens = generate(
+                    model, 4, config.length, config.vocab,
+                    steps=SAMPLE_NFE - 1, device=device,
+                    **({"use_protected_prune_step": True} if sampling["protected_prune_step"] else {}),
+                )
+                for row in tokens.cpu().tolist():
+                    text = "".join(ALPHABET[token] for token in row)
+                    texts.append(f"seed {seed}\n{text}" if len(sample_seeds) > 1 else text)
+                    sample_rows.append([seed, text] if len(sample_seeds) > 1 else [text])
             (run_path / "samples.txt").write_text("\n\n".join(texts))
             (report_path / "samples.txt").write_text("\n\n".join(texts))
             import wandb
 
             tracker.artifact(
                 "samples/text8",
-                wandb.Table(columns=["text"], data=[[text] for text in texts]),
+                wandb.Table(
+                    columns=(["seed"] if len(sample_seeds) > 1 else []) + ["text"],
+                    data=sample_rows,
+                ),
             )
         except BaseException:
             tracker.finish(exit_code=1)

@@ -9,6 +9,7 @@ from typing import Any
 import torch
 
 from slm.common.contracts import Report
+from slm.common.reporting import mean_scores, sampling_settings
 from slm.common.seeds import SAMPLE_SEED
 from slm.slm.core import (
     one_hot_tokens,
@@ -18,27 +19,12 @@ from slm.slm.core import (
     survival_ratio,
 )
 
+from slm.slm.sampling import protected_prune_step
+
 from .data import decode_board
 from .evaluation import sudoku_scores
 from .report import _load_report, _start_report
 from .task import clamp_clues, initial_candidates
-
-
-def _changes(before, after):
-    changes = []
-    for cell in (before != after).any(-1)[0].nonzero().flatten().tolist():
-        old, new = before[0, cell], after[0, cell]
-        digits = lambda mask: (mask.nonzero().flatten() + 1).tolist()
-        changes.append(
-            {
-                "cell": cell,
-                "before": digits(old),
-                "after": digits(new),
-                "removed": digits(old & ~new),
-                "added": digits(~old & new),
-            }
-        )
-    return changes
 
 
 def prune_step(model, candidate_mask, earlier_time, time, generator=None):
@@ -56,7 +42,6 @@ def prune_step(model, candidate_mask, earlier_time, time, generator=None):
         )
         sampled = uniform_draws < probs
         repaired = repair_empty(sampled, probs)
-        changes = _changes(sampled, repaired)
         return repaired, {
             "before": candidate_mask[0].cpu().tolist(),
             "model_probability": clean_probabilities[0].cpu().tolist(),
@@ -64,62 +49,10 @@ def prune_step(model, candidate_mask, earlier_time, time, generator=None):
             "draws": uniform_draws[0].cpu().tolist(),
             "sampled": sampled[0].cpu().tolist(),
             "repaired": repaired[0].cpu().tolist(),
-            "events": [{"kind": "empty_set_repair", "changes": changes}]
-            if changes
-            else [],
-        }
-
-def protected_prune_step(model, candidate_mask, earlier_time, time, generator=None):
-    with torch.no_grad():
-        clean_probabilities = (
-            predict_log_probs(model, candidate_mask, time.float()).double().exp()
-        )
-
-        clean_probabilities = clean_probabilities.masked_fill(
-            ~candidate_mask, 0.0
-        )
-
-        protected_digit = torch.multinomial(
-            clean_probabilities.reshape(
-                -1, clean_probabilities.shape[-1]
-            ),
-            num_samples=1,
-            generator=generator,
-        ).reshape(*clean_probabilities.shape[:-1], 1)
-
-        protected_probabilities = torch.zeros_like(clean_probabilities)
-        protected_probabilities.scatter_(-1, protected_digit, 1.0)
-
-        probs = reverse_probs(
-            clean_probabilities, candidate_mask, earlier_time.double(), time.double()
-        )
-        uniform_draws = torch.rand(
-            probs.shape, dtype=torch.float64, device=probs.device, generator=generator
-        )
-        sampled = uniform_draws < probs
-
-        survivors =  sampled & candidate_mask
-
-        # Explicitly enforce protection; no empty-set repair is needed.
-        survivors.scatter_(-1, protected_digit, True)
-
-        repaired = repair_empty(sampled, probs)
-        changes = _changes(sampled, repaired)
-
-        return repaired, {
-            "before": candidate_mask[0].cpu().tolist(),
-            "model_probability": clean_probabilities[0].cpu().tolist(),
-            "retention_probability": probs[0].cpu().tolist(),
-            "draws": uniform_draws[0].cpu().tolist(),
-            "sampled": sampled[0].cpu().tolist(),
-            "repaired": repaired[0].cpu().tolist(),
-            "events": [{"kind": "empty_set_repair", "changes": changes}]
-            if changes
-            else [],
         }
 
 
-def solve_sudoku(model, questions, steps, generator=None, use_protected_prune_step=False, observer=None):
+def solve_sudoku(model, questions, steps, generator=None, use_protected_prune_step=False):
     """Mirror evaluation.solve_sudoku for one board, returning recorded frames too."""
     if questions.ndim != 2 or len(questions) != 1 or questions.shape[1] not in (16, 81):
         raise ValueError("Expected one 4x4 or 9x9 question, with shape (1, cells)")
@@ -131,7 +64,6 @@ def solve_sudoku(model, questions, steps, generator=None, use_protected_prune_st
     try:
         with torch.inference_mode():
             candidates = initial_candidates(questions)
-            initial_changes = _changes(torch.ones_like(candidates), candidates)
             initial = candidates[0].cpu().tolist()
             frames.append(
                 {
@@ -147,13 +79,8 @@ def solve_sudoku(model, questions, steps, generator=None, use_protected_prune_st
                     "model_probability": None,
                     "retention_probability": None,
                     "draws": None,
-                    "events": [{"kind": "clue_enforcement", "changes": initial_changes}]
-                    if initial_changes
-                    else [],
                 }
             )
-            if observer is not None:
-                observer(0, candidates)
             for index in range(steps, 0, -1):
                 time = torch.full(
                     (len(questions),),
@@ -165,19 +92,13 @@ def solve_sudoku(model, questions, steps, generator=None, use_protected_prune_st
 
                 if use_protected_prune_step:
                     candidates, frame = protected_prune_step(
-                        model, candidates, earlier, time, generator
+                        model, candidates, earlier, time, generator, record=True
                     )
                 else:
                     candidates, frame = prune_step(
                         model, candidates, earlier, time, generator
                     )
-                before_enforcement = candidates
                 candidates = clamp_clues(candidates, questions)
-                changes = _changes(before_enforcement, candidates)
-                if changes:
-                    frame["events"].append(
-                        {"kind": "clue_enforcement", "changes": changes}
-                    )
                 frame.update(
                     kind="transition",
                     step=steps - index + 1,
@@ -189,8 +110,6 @@ def solve_sudoku(model, questions, steps, generator=None, use_protected_prune_st
                     after=candidates[0].cpu().tolist(),
                 )
                 frames.append(frame)
-                if observer is not None:
-                    observer(steps - index + 1, candidates)
             log_probs = predict_log_probs(
                 model, candidates, torch.zeros(len(questions), device=questions.device)
             )
@@ -211,8 +130,6 @@ def solve_sudoku(model, questions, steps, generator=None, use_protected_prune_st
                     "model_probability": log_probs.double().exp()[0].cpu().tolist(),
                     "retention_probability": None,
                     "draws": None,
-                    "events": [],
-                    "decoded": predicted[0].cpu().tolist(),
                 }
             )
     finally:
@@ -228,33 +145,17 @@ def analyse_trajectory(trajectory, question, reference):
             (i for i, frame in enumerate(frames) if not frame["after"][cell][digit]),
             None,
         )
-        wrong_singleton = next(
-            (
-                i
-                for i, frame in enumerate(frames)
-                if sum(frame["after"][cell]) == 1 and not frame["after"][cell][digit]
-            ),
-            None,
+        wrong_singleton = any(
+            sum(frame["after"][cell]) == 1 and not frame["after"][cell][digit]
+            for frame in frames
         )
-        interventions = [
-            i
-            for i, frame in enumerate(frames)
-            if any(
-                change["cell"] == cell
-                for event in frame["events"]
-                for change in event["changes"]
-            )
-        ]
         cells.append(
             {
                 "cell": cell,
                 "clue": question[cell] >= 0,
-                "reference": digit,
                 "first_loss": first_loss,
                 "wrong_singleton": wrong_singleton,
-                "interventions": interventions,
-                "multiple_until_decode": sum(frames[-1]["before"][cell]) > 1,
-                "incorrect_final": trajectory["prediction"][cell] != digit,
+                "multiple_until_decode": sum(frames[-1]["after"][cell]) > 1,
             }
         )
     return cells
@@ -319,9 +220,8 @@ class HeatmapReport(Report):
         board_id = getattr(args, "board_id", 0)
         if board_id < 0:
             raise ValueError("board-id must be a nonnegative test-split index")
-        seed_count = getattr(args, "sampling_seeds", 1)
-        if type(seed_count) is not int or seed_count < 1:
-            raise ValueError("sampling-seeds must be a positive integer")
+        sampling = sampling_settings(args, SAMPLE_SEED)
+        seed_count = sampling["sampling_seeds"]
         weights = getattr(args, "weights", "ema")
         config, model, test, completed, fingerprint, tracking = _load_report(
             args, weights=weights
@@ -333,19 +233,19 @@ class HeatmapReport(Report):
         steps = getattr(args, "sampling_steps", None)
         if steps is None:
             steps = args.config.sudoku.get("report_steps", config.sample_steps)
-        seed = getattr(args, "sampling_seed", None)
-        if seed is None:
-            seed = SAMPLE_SEED
         question, answer = test["questions"][board_id], test["answers"][board_id]
         q, ref = question.tolist(), answer.tolist()
         device_question = question.to(args.device)
-        seeds = [seed + index for index in range(seed_count)]
+        seeds = sampling["sampling_seed_list"]
         runs = []
+        use_protected_prune_step = sampling["protected_prune_step"]
         for sampling_seed in seeds:
             generator = torch.Generator(device=device_question.device).manual_seed(
                 sampling_seed
             )
-            trajectory = solve_sudoku(model, device_question[None], steps, generator, getattr(args, "protected_prune_step", False))
+            trajectory = solve_sudoku(
+                model, device_question[None], steps, generator, use_protected_prune_step
+            )
             prediction = torch.tensor(trajectory["prediction"], dtype=torch.long)
             runs.append(
                 {
@@ -360,10 +260,7 @@ class HeatmapReport(Report):
                     },
                 }
             )
-        scores = {
-            key: sum(run["scores"][key] for run in runs) / seed_count
-            for key in runs[0]["scores"]
-        }
+        scores = mean_scores([run["scores"] for run in runs])
         metadata = {
             "board_id": board_id,
             "board_id_scope": "zero-based selected test-split index",
@@ -374,18 +271,8 @@ class HeatmapReport(Report):
             "checkpoint_step": completed,
             "checkpoint_dataset_fingerprint": fingerprint,
             "weights": weights,
-            "sampling_seed": seed,
-            "sampling_seeds": seed_count,
-            "sampling_seed_list": seeds,
-            "sampling_scope": "same board, independent seed streams (not a replay of the batched sweep)",
+            **sampling,
             "sampling_steps": steps,
-            "sampling_budget": steps,
-            "interventions": {
-                "clue_enforcement": True,
-                "empty_set_repair": True,
-                "constraint_filtering": False,
-                "other": False,
-            },
         }
         payload = {
             "metadata": metadata,
@@ -402,7 +289,6 @@ class HeatmapReport(Report):
             "metadata": metadata,
             "scores": scores,
             "html": "trajectory.html",
-            "by_seed": [{"seed": run["seed"], "scores": run["scores"]} for run in runs],
         }
         report_path, tracker = _start_report(
             args, {**vars(config), "sample_steps": steps, **metadata}, report, tracking
@@ -410,7 +296,10 @@ class HeatmapReport(Report):
         html_path = report_path / "trajectory.html"
         try:
             write_html(html_path, payload)
-            log_wandb(tracker, completed, payload)
+            tracker.log(
+                completed,
+                {f"report/heatmap/{key}": value for key, value in scores.items()},
+            )
         except BaseException:
             tracker.finish(exit_code=1)
             raise
@@ -418,204 +307,6 @@ class HeatmapReport(Report):
             tracker.finish()
         print(f"Self-contained heatmap report: {html_path.resolve()}")
         return {**report, "html_path": str(html_path)}
-
-
-def log_wandb(tracker, completed, data):
-    import wandb
-
-    runs = data.get("runs", [data])
-    count = len(runs)
-
-    for key, value in data["metadata"].items():
-        tracker.run.summary[f"heatmap/{key}"] = value
-    tracker.log(
-        completed,
-        {f"report/heatmap/{key}": value for key, value in data["scores"].items()},
-    )
-    steps = [frame["step"] for frame in runs[0]["frames"]]
-    blanks = [i for i, digit in enumerate(data["question"]) if digit < 0]
-    survival = [
-        sum(
-            run["frames"][column]["after"][i][data["reference"][i]]
-            for run in runs
-            for i in blanks
-        )
-        / (count * len(blanks))
-        if blanks
-        else 1.0
-        for column in range(len(steps))
-    ]
-    counts = [
-        sum(sum(run["frames"][column]["after"][i]) for run in runs for i in blanks)
-        / (count * len(blanks))
-        if blanks
-        else 0.0
-        for column in range(len(steps))
-    ]
-    for name, values in (
-        ("reference_cell_survival", survival),
-        ("mean_blank_candidate_count", counts),
-    ):
-        tracker.artifact(
-            f"heatmap/{name}",
-            wandb.plot.line_series(
-                xs=steps,
-                ys=[values],
-                keys=[name],
-                title=name,
-                xname="sampling column (0=initial, N+1=decode)",
-            ),
-        )
-    transitions = [
-        frame for frame in runs[0]["frames"] if frame["kind"] == "transition"
-    ]
-    tracker.artifact(
-        "heatmap/reverse_survival_ratio",
-        wandb.plot.line_series(
-            xs=[frame["step"] for frame in transitions],
-            ys=[[frame["reverse_survival_ratio"] for frame in transitions]],
-            keys=["reverse survival ratio"],
-            title="Reverse survival schedule",
-            xname="sampling transition",
-        ),
-    )
-    kinds = sorted(
-        {
-            event["kind"]
-            for run in runs
-            for frame in run["frames"]
-            for event in frame["events"]
-        }
-    )
-    if kinds:
-        tracker.artifact(
-            "heatmap/interventions",
-            wandb.plot.line_series(
-                xs=steps,
-                ys=[
-                    [
-                        sum(
-                            len(event["changes"])
-                            for run in runs
-                            for event in run["frames"][column]["events"]
-                            if event["kind"] == kind
-                        )
-                        / count
-                        for column in range(len(steps))
-                    ]
-                    for kind in kinds
-                ],
-                keys=kinds,
-                title="Mean cells modified by interventions per seed",
-                xname="sampling column (0=initial, N+1=decode)",
-            ),
-        )
-    side = data["vocab"]
-    events = [
-        [
-            run["seed"],
-            frame["step"],
-            frame["time"],
-            event["kind"],
-            change["cell"],
-            change["cell"] // side + 1,
-            change["cell"] % side + 1,
-            str(change["removed"]),
-            str(change["added"]),
-            str(change["before"]),
-            str(change["after"]),
-        ]
-        for run in runs
-        for frame in run["frames"]
-        for event in frame["events"]
-        for change in event["changes"]
-    ]
-    tracker.artifact(
-        "heatmap/events",
-        wandb.Table(
-            columns=[
-                "seed",
-                "step",
-                "time_before",
-                "intervention",
-                "cell",
-                "row",
-                "column",
-                "removed",
-                "added",
-                "before",
-                "after",
-            ],
-            data=events,
-        ),
-    )
-    failures = [
-        [
-            run["seed"],
-            cell["cell"],
-            cell["cell"] // side + 1,
-            cell["cell"] % side + 1,
-            cell["reference"] + 1,
-            run["prediction"][cell["cell"]] + 1,
-            cell["first_loss"],
-            cell["wrong_singleton"],
-            str(cell["interventions"]),
-            cell["multiple_until_decode"],
-        ]
-        for run in runs
-        for cell in run["cells"]
-        if cell["first_loss"] is not None
-        or cell["wrong_singleton"] is not None
-        or cell["interventions"]
-        or cell["multiple_until_decode"]
-        or cell["incorrect_final"]
-    ]
-    tracker.artifact(
-        "heatmap/failures",
-        wandb.Table(
-            columns=[
-                "seed",
-                "cell",
-                "row",
-                "column",
-                "reference",
-                "prediction",
-                "first_reference_loss",
-                "first_wrong_singleton",
-                "intervention_columns",
-                "multiple_at_decode",
-            ],
-            data=failures,
-        ),
-    )
-    question = decode_board(torch.tensor(data["question"], dtype=torch.long))
-    reference = decode_board(torch.tensor(data["reference"], dtype=torch.long))
-    tracker.artifact(
-        "heatmap/board",
-        wandb.Table(
-            columns=["seed", "question", "reference", "prediction"],
-            data=[
-                [
-                    run["seed"],
-                    question,
-                    reference,
-                    decode_board(torch.tensor(run["prediction"], dtype=torch.long)),
-                ]
-                for run in runs
-            ],
-        ),
-    )
-    if count > 1:
-        keys = list(data["scores"])
-        tracker.artifact(
-            "heatmap/seed_scores",
-            wandb.Table(
-                columns=["seed", *keys],
-                data=[
-                    [run["seed"], *[run["scores"][key] for key in keys]] for run in runs
-                ],
-            ),
-        )
 
 
 def write_html(path: Path, data):
@@ -642,22 +333,22 @@ body{font:14px system-ui,sans-serif;margin:20px;color:#172033;background:#f8fafc
 <h3>Mean reference-digit probability (blank cells)</h3><div id="averageOverviewScroll" class="scroll"><canvas id="averageOverview"></canvas><div id="averageOverviewCursor" class="time-cursor"></div></div>
 <div id="averageExpandedPanel" class="expanded-panel"><div class="panel-heading"><h3 id="averageExpandedTitle">Mean candidate probabilities</h3><button id="averageSticky" class="sticky-toggle" type="button" aria-pressed="false" aria-label="Pin mean expanded view" title="Pin expanded view while scrolling">📌</button></div><div id="averageExpandedScroll" class="scroll"><canvas id="averageExpanded"></canvas><div id="averageExpandedCursor" class="time-cursor"></div></div></div><pre id="averageInspection"></pre>
 <h3>Candidate survival frequencies through time</h3><label>Time <input id="averageSlider" type="range" min="0" step="1" value="0"></label><label>Candidate state <select id="averageStage"><option value="after_frequency">After transition</option><option value="before_frequency">Before transition</option></select></label><p id="averageFrameLabel"></p><p id="averageFrameSummary"></p><div class="scroll"><div id="averageBoard" class="candidate-board"></div></div></section>
-<details id="individualTrajectory" open><summary><b>Individual seed trajectory</b> — actual candidates, draws and interventions</summary><label>Seed <select id="seedSelect"></select></label>
+<details id="individualTrajectory" open><summary><b>Individual seed trajectory</b> — actual candidates and draws</summary><label>Seed <select id="seedSelect"></select></label>
 <section><details id="info"><summary><b>Info: identity and outcome</b></summary><pre id="metadata"></pre></details><div id="boards" class="boards"></div></section>
 <section><h2>Probability and cell filters</h2>
 <label>Probability <select id="mode"><option value="model_probability">Model digit probability (masked, normalized)</option><option value="retention_probability">Sampler retention probability (Bernoulli inclusion)</option></select></label>
 <label><input id="clues" type="checkbox">Show fixed clues</label>
-<label>Cells <select id="filter"><option value="all">All</option><option value="lost">Lost reference digit</option><option value="wrong">Incorrect singleton</option><option value="intervention">Required intervention</option><option value="multiple">Multiple candidates until decoding</option></select></label>
-<p><b>Timing:</b> color = probability <b>before</b> pruning; borders/counts = candidates <b>after</b> sampling, repair and clue enforcement. Initial state is separate; final decoding chooses a digit without changing the candidate set.</p>
-<div class="legend"><span>0 <span class="gradient"></span> 1 (fixed probability scale)</span><span class="masked">Already eliminated: zero forced by mask</span><span style="color:#dc2626">▲ first reference loss</span><span>▣ singleton / surviving digit border</span><span style="color:#b45309">★ intervention</span><span>— probability not applicable</span><span>✓ final selected digit; compact ✓/× = reference match/mismatch</span></div>
+<label>Cells <select id="filter"><option value="all">All</option><option value="lost">Lost reference digit</option><option value="wrong">Incorrect singleton</option><option value="multiple">Multiple candidates until decoding</option></select></label>
+<p><b>Timing:</b> color = probability <b>before</b> pruning; borders/counts = candidates <b>after</b> sampling, repair/protection and clue enforcement. Initial state is separate; final decoding chooses a digit without changing the candidate set.</p>
+<div class="legend"><span>0 <span class="gradient"></span> 1 (fixed probability scale)</span><span class="masked">Already eliminated: zero forced by mask</span><span style="color:#dc2626">▲ first reference loss</span><span>▣ singleton / surviving digit border</span><span>— probability not applicable</span><span>✓ final selected digit; compact ✓/× = reference match/mismatch</span></div>
 <p id="modeNote" class="hint"></p>
 </section>
-<section><h2>Timeline: timestep and reverse survival ratio</h2><p>Click a column to freeze the whole-board view at that transition. Each label shows actual step, pre-pruning timestep t, and schedule ratio s. The blue line underneath is s on a fixed 0–1 scale; s is a schedule factor, not the observed surviving-cell fraction. Stars appear only for actual forced changes. No empty intervention lanes are shown.</p><div id="timelineScroll" class="scroll"><canvas id="timeline"></canvas><div id="timelineCursor" class="time-cursor"></div></div><details id="stepEvents"><summary>Actual forced changes at the selected step</summary><div id="eventCells"></div><pre id="eventDetails"></pre></details></section>
+<section><h2>Timeline: timestep and reverse survival ratio</h2><p>Click a column to freeze the whole-board view at that transition. Each label shows actual step, pre-pruning timestep t, and schedule ratio s. The blue line underneath is s on a fixed 0–1 scale; s is a schedule factor, not the observed surviving-cell fraction.</p><div id="timelineScroll" class="scroll"><canvas id="timeline"></canvas><div id="timelineCursor" class="time-cursor"></div></div></section>
 <section><h2>Compact overview: reference-digit probability</h2><p>One row per originally blank cell, in board-position order. Numbers are candidate counts after the column; hover/click for before/after counts and exact probabilities. Hatching marks masked zeros after elimination.</p><div id="overviewScroll" class="scroll"><canvas id="overview"></canvas><div id="overviewCursor" class="time-cursor"></div></div><p id="empty"></p></section>
 <section id="expandedPanel" class="expanded-panel"><div class="panel-heading"><h2 id="expandedTitle">Expanded candidate view</h2><button id="expandedSticky" class="sticky-toggle" type="button" aria-pressed="false" aria-label="Pin expanded view" title="Pin expanded view while scrolling">📌</button></div><p>One row per digit. <b>Bold borders</b> mean the digit survives the transition. The reference row is labeled ★. Click a Sudoku cell, overview row or digit box to link the views.</p><div id="expandedScroll" class="scroll"><canvas id="expanded"></canvas><div id="expandedCursor" class="time-cursor"></div></div></section>
-<section><h2>Box inspection</h2><label><input id="pin" type="checkbox">Pin inspection (clicking a box pins it)</label><p class="hint">Hover previews a single box without moving the board's selected time. Click a box to pin it and synchronize the board below. Uncheck Pin to resume hover previews.</p><div id="inspection"></div><details><summary>Intermediate candidate sets and actual interventions</summary><pre id="inspectionDetails"></pre></details></section>
-<section><h2>Whole-board candidates through time</h2><label>Time <input id="stepSlider" type="range" min="0" step="1" value="0"></label><button id="previousStep">Previous</button> <button id="nextStep">Next</button><p id="frameLabel"></p><label>Candidate state <select id="stage"><option value="after">After transition</option><option value="before">Before transition</option></select></label><p id="frameSummary"></p><p>Each cell shows all candidates at the selected state; the sets shrink and singletons become large digits. n = candidate count, −/+ = removed/added counts, ★ = actual forced change. Cell positions stay fixed. Colors still use probabilities <b>before</b> the selected transition. Cell borders: red = reference lost, blue = selected. A selected error cell has alternating red/blue segments. Bold digit = reference; gold = final decoded digit. Purple cells share the selected cell's row, column or box (structural peers, not all attention connections).</p><div class="scroll"><div id="candidateBoard" class="candidate-board"></div></div>
-<h3>Cross-cell comparison at this time</h3><label>Probability target <select id="compareTarget"><option value="reference">Reference digit in each cell</option><option value="selected">Selected digit across all cells</option></select></label><label><input id="changedOnly" type="checkbox">Only changed/intervened cells</label><p id="compareScope"></p><div class="table-scroll"><table><thead><tr><th>Cell</th><th>Target</th><th>Before candidates</th><th>After candidates</th><th>Removed / added</th><th>Model p before</th><th>Retention q</th><th>Model p next call</th><th>Δ model p</th></tr></thead><tbody id="comparisonRows"></tbody></table></div></section>
+<section><h2>Box inspection</h2><label><input id="pin" type="checkbox">Pin inspection (clicking a box pins it)</label><p class="hint">Hover previews a single box without moving the board's selected time. Click a box to pin it and synchronize the board below. Uncheck Pin to resume hover previews.</p><div id="inspection"></div><details><summary>Intermediate candidate sets (repair/protection)</summary><pre id="inspectionDetails"></pre></details></section>
+<section><h2>Whole-board candidates through time</h2><label>Time <input id="stepSlider" type="range" min="0" step="1" value="0"></label><button id="previousStep">Previous</button> <button id="nextStep">Next</button><p id="frameLabel"></p><label>Candidate state <select id="stage"><option value="after">After transition</option><option value="before">Before transition</option></select></label><p id="frameSummary"></p><p>Each cell shows all candidates at the selected state; the sets shrink and singletons become large digits. n = candidate count, −/+ = removed/added counts. Cell positions stay fixed. Colors still use probabilities <b>before</b> the selected transition. Cell borders: red = reference lost, blue = selected. A selected error cell has alternating red/blue segments. Bold digit = reference; gold = final decoded digit. Purple cells share the selected cell's row, column or box (structural peers, not all attention connections).</p><div class="scroll"><div id="candidateBoard" class="candidate-board"></div></div>
+<h3>Cross-cell comparison at this time</h3><label>Probability target <select id="compareTarget"><option value="reference">Reference digit in each cell</option><option value="selected">Selected digit across all cells</option></select></label><label><input id="changedOnly" type="checkbox">Only cells with candidate changes</label><p id="compareScope"></p><div class="table-scroll"><table><thead><tr><th>Cell</th><th>Target</th><th>Before candidates</th><th>After candidates</th><th>Removed / added</th><th>Model p before</th><th>Retention q</th><th>Model p next call</th><th>Δ model p</th></tr></thead><tbody id="comparisonRows"></tbody></table></div></section>
 </details>
 <script id="trajectory" type="application/json">__TRAJECTORY_DATA__</script>
 <script>
@@ -665,25 +356,23 @@ body{font:14px system-ui,sans-serif;margin:20px;color:#172033;background:#f8fafc
 const DATA=JSON.parse(document.getElementById('trajectory').textContent), RUNS=DATA.runs??[DATA], A=DATA.average, side=DATA.vocab;
 let D={...DATA,...RUNS[0]}, F=D.frames, averageColumn=0;
 const $=id=>document.getElementById(id), cellName=c=>'r'+(Math.floor(c/side)+1)+'c'+(c%side+1), digits=m=>m.flatMap((v,i)=>v?[i+1]:[]);
-let selected=D.question.findIndex(v=>v<0), selectedColumn=0, selectedDigit=0, columns=[], rows=[], width=20;
+let selected=D.question.findIndex(v=>v<0), selectedColumn=0, selectedDigit=0, rows=[];
 if(selected<0)selected=0;selectedDigit=D.reference[selected];
-const labelWidth=140, rowHeight=24;
-columns=F.map((_,i)=>i);
+const labelWidth=140, rowHeight=24, columns=F.map((_,i)=>i), width=Math.max(4,Math.min(24,Math.floor(24000/columns.length)));
 $('metadata').textContent=JSON.stringify({...D.metadata,selected_seed:D.seed,scores:D.scores},null,2);
 $('stepSlider').max=F.length-1;
 $('averageSection').hidden=!A;$('individualTrajectory').open=!A;
 RUNS.forEach((run,index)=>{const option=document.createElement('option');option.value=index;option.textContent='Seed '+run.seed;$('seedSelect').appendChild(option)});$('seedSelect').value='0';
-if(A){$('averageSlider').max=A.frames.length-1;$('averageTitle').textContent='Average across '+RUNS.length+' seeds';$('averageSummary').textContent=JSON.stringify({board_id:DATA.metadata.board_id,board_key:DATA.metadata.board_key,seeds:DATA.metadata.sampling_seed_list,sampling_steps:DATA.metadata.sampling_steps,mean_scores:DATA.scores},null,2);$('averageOutcomes').textContent=JSON.stringify(RUNS.map(run=>({seed:run.seed,scores:run.scores})),null,2)}
-function matches(c){const a=D.cells[c], f=$('filter').value;return f==='all'||f==='lost'&&a.first_loss!==null||f==='wrong'&&a.wrong_singleton!==null||f==='intervention'&&a.interventions.length>0||f==='multiple'&&a.multiple_until_decode}
+if(A){$('averageSlider').max=A.frames.length-1;$('averageTitle').textContent='Average across '+RUNS.length+' seeds';$('averageSummary').textContent=JSON.stringify({board_id:DATA.metadata.board_id,board_key:DATA.metadata.board_key,seeds:DATA.metadata.sampling_seed_list,sampling_steps:DATA.metadata.sampling_steps,protected_prune_step:DATA.metadata.protected_prune_step,mean_scores:DATA.scores},null,2);$('averageOutcomes').textContent=JSON.stringify(RUNS.map(run=>({seed:run.seed,scores:run.scores})),null,2)}
+function matches(c){const a=D.cells[c], f=$('filter').value;return f==='all'||f==='lost'&&a.first_loss!==null||f==='wrong'&&a.wrong_singleton||f==='multiple'&&a.multiple_until_decode}
 function columnLabel(f){return f.kind==='initial'?'initial t=1 s=—':f.kind==='decode'?'decode t=0 s=—':'step '+f.step+' t='+f.time.toFixed(4)+' s='+f.reverse_survival_ratio.toFixed(4)}
-function cellEvents(f,c,d=null){return f.events.flatMap(e=>e.changes.filter(a=>a.cell===c&&(d===null||a.added.includes(d+1)||a.removed.includes(d+1))).map(a=>({kind:e.kind,...a})))}
 function mechanisms(f,c,d){
  if(f.kind==='initial')return D.question[c]>=0?['Initial clue enforcement']:['Initial unrestricted blank'];
- if(f.kind==='decode')return [f.decoded[c]===d?'Selected by final decoding (mask unchanged)':'Not selected by final decoding (mask unchanged)'];
+ if(f.kind==='decode')return [D.prediction[c]===d?'Selected by final decoding (mask unchanged)':'Not selected by final decoding (mask unchanged)'];
  const result=[];
  if(!f.before[c][d])result.push('Unavailable before pruning: ordinary candidate masking forces probability to zero');
  else result.push(f.sampled[c][d]?'Retained by Bernoulli sampling':'Removed by Bernoulli sampling');
- if(f.sampled[c][d]!==f.repaired[c][d])result.push('Changed by empty-set repair');
+ if(f.sampled[c][d]!==f.repaired[c][d])result.push(DATA.metadata.protected_prune_step?'Kept by protected-digit enforcement':'Changed by empty-set repair');
  if(f.repaired[c][d]!==f.after[c][d])result.push('Changed by clue enforcement');
  return result;
 }
@@ -718,24 +407,24 @@ function inspect(fi,c,d){
  refState.textContent=f.after[c][D.reference[c]]?'Reference digit still available.':'Reference digit lost; first elimination at step '+D.cells[c].first_loss+'.';root.appendChild(refState);
  $('inspectionDetails').textContent=JSON.stringify({time_before:info.time_before,time_after:info.time_after,
   reverse_survival_ratio:info.reverse_survival_ratio,after_sampling:digits(f.sampled[c]),
-  after_repair:digits(f.repaired[c]),interventions:cellEvents(f,c),final_digit:info.final_digit},null,2);
+  after_repair_or_protection:digits(f.repaired[c]),final_digit:info.final_digit},null,2);
 }
 function selectCell(c,d=D.reference[c]){selected=c;selectedDigit=d;if(D.question[c]>=0)$('clues').checked=true;if(!matches(c))$('filter').value='all';$('pin').checked=true;render();inspect(selectedColumn,c,d)}
 function boardCell(c){selectCell(c,$('compareTarget').value==='selected'?selectedDigit:D.reference[c])}
-function selectTime(fi){selectedColumn=Math.max(0,Math.min(F.length-1,fi));moveCursors();drawWholeBoard();showEvents(selectedColumn);inspect(selectedColumn,selected,selectedDigit)}
+function selectTime(fi){selectedColumn=Math.max(0,Math.min(F.length-1,fi));moveCursors();drawWholeBoard();inspect(selectedColumn,selected,selectedDigit)}
 function drawBoards(){const root=$('boards');root.replaceChildren();[['Original puzzle',D.question],['Reference solution',D.reference],['Final prediction',D.prediction]].forEach(([title,values],boardIndex)=>{
  const wrap=document.createElement('div'), heading=document.createElement('h3');heading.textContent=title;wrap.appendChild(heading);const board=document.createElement('div');board.className='board';board.style.gridTemplateColumns='repeat('+side+',32px)';const box=Math.sqrt(side);
  values.forEach((v,c)=>{const b=document.createElement('button');b.textContent=v<0?'·':v+1;b.title=cellName(c)+' (cell '+c+')';if(D.question[c]>=0)b.classList.add('clue');if(boardIndex===2&&v!==D.reference[c])b.classList.add('incorrect');if(c===selected)b.classList.add('selected');if((c%side+1)%box===0&&c%side<side-1)b.style.borderRight='2px solid #172033';if((Math.floor(c/side)+1)%box===0&&Math.floor(c/side)<side-1)b.style.borderBottom='2px solid #172033';b.onclick=()=>boardCell(c);board.appendChild(b)});wrap.appendChild(board);root.appendChild(wrap)
 })}
 function prepare(canvas,height){canvas.width=labelWidth+width*columns.length;canvas.height=height;const ctx=canvas.getContext('2d');ctx.fillStyle='white';ctx.fillRect(0,0,canvas.width,canvas.height);ctx.font='11px system-ui';return ctx}
-function marker(ctx,x,y,c,f,d,compact){const events=cellEvents(f,c,compact?null:d);if(events.length){ctx.fillStyle='#b45309';ctx.fillText('★',x+width-11,y+11)}if(D.cells[c].first_loss===f.step&&(compact||d===D.reference[c])){ctx.fillStyle='#dc2626';ctx.beginPath();ctx.moveTo(x+1,y+1);ctx.lineTo(x+9,y+1);ctx.lineTo(x+1,y+9);ctx.closePath();ctx.fill()}}
+function markReferenceLoss(ctx,x,y,c,f,d,compact){if(D.cells[c].first_loss===f.step&&(compact||d===D.reference[c])){ctx.fillStyle='#dc2626';ctx.beginPath();ctx.moveTo(x+1,y+1);ctx.lineTo(x+9,y+1);ctx.lineTo(x+1,y+9);ctx.closePath();ctx.fill()}}
 function paint(ctx,x,y,c,d,f,compact){const p=f[$('mode').value]?.[c][d];const masked=f.kind!=='initial'&&!f.before[c][d];
  if(p===undefined||p===null)ctx.fillStyle='#e2e8f0';else ctx.fillStyle='rgb('+Math.round(255-235*p)+','+Math.round(255-170*p)+','+Math.round(255-58*p)+')';ctx.fillRect(x,y,width,rowHeight);
  if(masked){ctx.fillStyle='#ededed';ctx.fillRect(x,y,width,rowHeight);ctx.strokeStyle='#a1a1aa';ctx.beginPath();for(let i=0;i<width+rowHeight;i+=6){ctx.moveTo(x+Math.max(0,i-rowHeight),y+Math.min(i,rowHeight));ctx.lineTo(x+Math.min(i,width),y+Math.max(0,i-width))}ctx.stroke()}
  const survives=compact?digits(f.after[c]).length===1:f.after[c][d];ctx.strokeStyle=survives?'#172033':'#cbd5e1';ctx.lineWidth=survives?2:0.5;ctx.strokeRect(x+1,y+1,width-2,rowHeight-2);
  if(compact&&width>=12){ctx.fillStyle=masked||p===undefined||p<0.65?'#172033':'white';ctx.fillText(digits(f.after[c]).length,x+width/2-3,y+17)}else if((p===undefined||p===null)&&width>=12){ctx.fillStyle='#64748b';ctx.fillText('—',x+3,y+17)}
- if(f.kind==='decode'&&width>=12&&(compact||f.decoded[c]===d)){ctx.fillStyle='#172033';ctx.fillText(f.decoded[c]===d?'✓':'×',x+2,y+22)}
- marker(ctx,x,y,c,f,d,compact);
+ if(f.kind==='decode'&&width>=12&&(compact||D.prediction[c]===d)){ctx.fillStyle='#172033';ctx.fillText(D.prediction[c]===d?'✓':'×',x+2,y+22)}
+ markReferenceLoss(ctx,x,y,c,f,d,compact);
 }
 function moveCursors(){['timelineCursor','overviewCursor','expandedCursor'].forEach(id=>{$(id).style.left=(labelWidth+selectedColumn*width)+'px';$(id).style.width=width+'px'})}
 function drawOverview(){const ctx=prepare($('overview'),Math.max(30,rows.length*rowHeight));rows.forEach((c,r)=>{const y=r*rowHeight;ctx.fillStyle=c===selected?'#fff0c2':'#f1f5f9';ctx.fillRect(0,y,labelWidth,rowHeight);ctx.fillStyle='#172033';ctx.fillText(cellName(c)+' ref '+(D.reference[c]+1)+(D.question[c]>=0?' [clue]':''),5,y+17);columns.forEach((fi,i)=>paint(ctx,labelWidth+i*width,y,c,D.reference[c],F[fi],true));if(c===selected){ctx.strokeStyle='#f59e0b';ctx.lineWidth=2;ctx.strokeRect(1,y+1,$('overview').width-2,rowHeight-2)}});$('empty').textContent=rows.length?'':'No cells match this filter.'}
@@ -743,15 +432,9 @@ function highlightRow(ctx,canvas,y){ctx.strokeStyle='#f59e0b';ctx.lineWidth=3;ct
 function drawExpanded(){const ctx=prepare($('expanded'),side*rowHeight);$('expandedTitle').textContent='Expanded '+cellName(selected)+' — reference digit '+(D.reference[selected]+1);for(let d=0;d<side;d++){const y=d*rowHeight;ctx.fillStyle=d===selectedDigit?'#fff0c2':d===D.reference[selected]?'#fef3c7':'#f1f5f9';ctx.fillRect(0,y,labelWidth,rowHeight);ctx.fillStyle='#172033';ctx.fillText((d===D.reference[selected]?'★ reference ':'digit ')+(d+1),5,y+17);columns.forEach((fi,i)=>paint(ctx,labelWidth+i*width,y,selected,d,F[fi],false));if(d===selectedDigit)highlightRow(ctx,$('expanded'),y)}}
 function drawTimeline(id='timeline',frames=F){
  const ctx=prepare($(id),240);ctx.fillStyle='#172033';ctx.fillText('reverse survival s',3,212);
- columns.forEach((fi,i)=>{const x=labelWidth+i*width,f=frames[fi];ctx.save();ctx.translate(x+width/2,178);ctx.rotate(-Math.PI/2);ctx.fillText(columnLabel(f),0,0);ctx.restore();if(f.events?.length){ctx.fillStyle='#b45309';ctx.fillText('★',x+1,237);ctx.fillStyle='#172033'}});
+ columns.forEach((fi,i)=>{const x=labelWidth+i*width,f=frames[fi];ctx.save();ctx.translate(x+width/2,178);ctx.rotate(-Math.PI/2);ctx.fillText(columnLabel(f),0,0);ctx.restore();});
  ctx.strokeStyle='#2563eb';ctx.lineWidth=2;ctx.beginPath();let started=false;
  columns.forEach((fi,i)=>{const s=frames[fi].reverse_survival_ratio;if(s===null)return;const x=labelWidth+(i+.5)*width,y=225-35*s;if(!started){ctx.moveTo(x,y);started=true}else ctx.lineTo(x,y)});ctx.stroke();
-}
-function showEvents(fi){
- const f=F[fi];$('stepEvents').hidden=f.events.length===0;
- $('eventDetails').textContent=JSON.stringify(f.events,null,2);
- const root=$('eventCells');root.replaceChildren();
- [...new Set(f.events.flatMap(e=>e.changes.map(a=>a.cell)))].forEach(c=>{const b=document.createElement('button');b.textContent=cellName(c);b.onclick=()=>boardCell(c);root.appendChild(b)});
 }
 function peer(c){const box=Math.sqrt(side);return Math.floor(c/side)===Math.floor(selected/side)||c%side===selected%side||Math.floor(c/side/box)===Math.floor(selected/side/box)&&Math.floor(c%side/box)===Math.floor(selected%side/box)}
 function targetDigit(c){return $('compareTarget').value==='selected'?selectedDigit:D.reference[c]}
@@ -773,7 +456,7 @@ function drawWholeBoard(){
  const root=$('candidateBoard');root.replaceChildren();root.style.gridTemplateColumns='repeat('+side+',1fr)';root.style.minWidth=(side*90+2*(side-1))+'px';root.style.maxWidth=(side*106+2*(side-1))+'px';const box=Math.sqrt(side);
  state.forEach((mask,c)=>{
   const tile=document.createElement('div');tile.className='candidate-cell';
-  if(D.question[c]>=0)tile.classList.add('clue');if(peer(c)&&c!==selected)tile.classList.add('peer');if(c===selected)tile.classList.add('selected');tile.classList.add(mask[D.reference[c]]?'reference-alive':'lost');
+  if(D.question[c]>=0)tile.classList.add('clue');if(peer(c)&&c!==selected)tile.classList.add('peer');if(c===selected)tile.classList.add('selected');if(!mask[D.reference[c]])tile.classList.add('lost');
   if((c%side+1)%box===0&&c%side<side-1)tile.style.borderRight='3px solid #334155';if((Math.floor(c/side)+1)%box===0&&Math.floor(c/side)<side-1)tile.style.borderBottom='3px solid #334155';
   const caption=document.createElement('div');caption.className='cell-caption';caption.textContent=cellName(c)+(D.question[c]>=0?' · clue':' · n='+digits(mask).length);tile.appendChild(caption);
   const grid=document.createElement('div');grid.className='candidate-digits';const remaining=digits(mask);grid.style.gridTemplateColumns='repeat('+Math.max(1,Math.min(box,Math.ceil(Math.sqrt(remaining.length))))+',1fr)';
@@ -782,11 +465,11 @@ function drawWholeBoard(){
    const p=f[$('mode').value]?.[c][d];if(p!==undefined){b.style.background='rgb('+Math.round(255-235*p)+','+Math.round(255-170*p)+','+Math.round(255-58*p)+')';b.style.color=p>.65?'white':'#172033'}
    if(d===D.reference[c])b.classList.add('reference');if(f.kind==='decode'&&d===D.prediction[c])b.classList.add('decoded');
    b.title=cellName(c)+' digit '+digit;b.onclick=e=>{e.stopPropagation();selectCell(c,d)};grid.appendChild(b)});
-  tile.appendChild(grid);const delta=comparisonData(selectedColumn,c),footer=document.createElement('div');footer.className='cell-caption';footer.textContent='ref '+(D.reference[c]+1)+(delta.removed.length?' · −'+delta.removed.length:'')+(delta.added.length?' · +'+delta.added.length:'')+(cellEvents(f,c).length?' ★':'');tile.appendChild(footer);tile.onclick=()=>boardCell(c);root.appendChild(tile);
+  tile.appendChild(grid);const delta=comparisonData(selectedColumn,c),footer=document.createElement('div');footer.className='cell-caption';footer.textContent='ref '+(D.reference[c]+1)+(delta.removed.length?' · −'+delta.removed.length:'')+(delta.added.length?' · +'+delta.added.length:'');tile.appendChild(footer);tile.onclick=()=>boardCell(c);root.appendChild(tile);
  });
  $('compareScope').textContent=$('compareTarget').value==='selected'?'Target: selected digit '+(selectedDigit+1)+' in every cell.':'Target: each cell’s own reference digit.';
  const tbody=$('comparisonRows');tbody.replaceChildren();
- D.cells.forEach(cell=>{const c=cell.cell,a=comparisonData(selectedColumn,c);if($('changedOnly').checked&&!a.removed.length&&!a.added.length&&!cellEvents(f,c).length)return;
+ D.cells.forEach(cell=>{const c=cell.cell,a=comparisonData(selectedColumn,c);if($('changedOnly').checked&&!a.removed.length&&!a.added.length)return;
   const row=document.createElement('tr');if(c===selected)row.className='selected';else if(peer(c))row.className='peer';
   const values=[cellName(c)+(cell.clue?' [clue]':''),a.target,a.before.join(','),a.after.join(','),'-['+a.removed.join(',')+'] / +['+a.added.join(',')+']',probabilityText(a.model_probability),probabilityText(a.retention_probability),probabilityText(a.next_model_probability),probabilityText(a.delta)];
   values.forEach((value,i)=>{const td=document.createElement('td');td.textContent=value;if(i>=5)td.title=String([a.model_probability,a.retention_probability,a.next_model_probability,a.delta][i-5]??'Not applicable');if(i===8&&a.delta!==null)td.className=a.delta<0?'danger':'good';row.appendChild(td)});row.onclick=()=>boardCell(c);tbody.appendChild(row);
@@ -820,7 +503,7 @@ function drawAverageBoard(){
  $('averageFrameSummary').textContent='After column: mean candidates per blank cell '+probabilityText(meanCount)+'; mean reference-cell survival '+probabilityText(ref)+'; reference intact across all blanks in '+probabilityText(f.reference_board_survival)+' of seeds.';
  root.replaceChildren();root.style.gridTemplateColumns='repeat('+side+',1fr)';root.style.minWidth=(side*90+2*(side-1))+'px';root.style.maxWidth=(side*106+2*(side-1))+'px';
  state.forEach((frequency,c)=>{
-  const tile=document.createElement('div');tile.className='candidate-cell';if(DATA.question[c]>=0)tile.classList.add('clue');if(c===selected)tile.classList.add('selected');tile.classList.add(frequency[DATA.reference[c]]===1?'reference-alive':frequency[DATA.reference[c]]===0?'lost':'partial');
+  const tile=document.createElement('div');tile.className='candidate-cell';if(DATA.question[c]>=0)tile.classList.add('clue');if(c===selected)tile.classList.add('selected');if(frequency[DATA.reference[c]]<1)tile.classList.add(frequency[DATA.reference[c]]===0?'lost':'partial');
   if((c%side+1)%box===0&&c%side<side-1)tile.style.borderRight='3px solid #334155';if((Math.floor(c/side)+1)%box===0&&Math.floor(c/side)<side-1)tile.style.borderBottom='3px solid #334155';
   const caption=document.createElement('div');caption.className='cell-caption';caption.textContent=cellName(c)+' · mean n='+probabilityText(frequency.reduce((a,b)=>a+b,0));tile.appendChild(caption);
   const grid=document.createElement('div');grid.className='candidate-digits';grid.style.gridTemplateColumns='repeat('+box+',1fr)';
@@ -841,7 +524,7 @@ function drawAverage(){
 }
 function selectAverageTime(fi){if(!A)return;averageColumn=Math.max(0,Math.min(A.frames.length-1,fi));moveAverageCursors();drawAverageBoard();inspectAverage(averageColumn,selected,selectedDigit)}
 function selectAverageCell(c,d){selected=c;selectedDigit=d;$('averagePin').checked=true;render();inspectAverage(averageColumn,c,d)}
-function render(){rows=D.cells.filter(a=>($('clues').checked||!a.clue)&&matches(a.cell)).map(a=>a.cell);width=Math.max(4,Math.min(24,Math.floor(24000/columns.length)));$('modeNote').textContent=$('mode').value==='model_probability'?'Color is the model probability of the reference digit in the overview, or the row’s digit in the expanded view. Dark blue = high predicted probability; gray hatching = excluded by the mask.':'Color is the chance that this candidate survives this one transition. Dark blue early is expected for nearly all digits because s is high; it does NOT indicate a selected answer or model confidence. Retention is undefined at initialization and decoding.';drawBoards();drawTimeline();drawOverview();drawExpanded();moveCursors();drawWholeBoard();showEvents(selectedColumn);drawAverage();if(A)inspectAverage(averageColumn,selected,selectedDigit)}
+function render(){rows=D.cells.filter(a=>($('clues').checked||!a.clue)&&matches(a.cell)).map(a=>a.cell);$('modeNote').textContent=$('mode').value==='model_probability'?'Color is the model probability of the reference digit in the overview, or the row’s digit in the expanded view. Dark blue = high predicted probability; gray hatching = excluded by the mask.':'Color is the chance that this candidate survives this one transition. Dark blue early is expected for nearly all digits because s is high; it does NOT indicate a selected answer or model confidence. Retention is undefined at initialization and decoding.';if(DATA.metadata.protected_prune_step)$('modeNote').textContent+=' Protected mode additionally guarantees a model-sampled digit survives; q describes the Bernoulli pruning before that enforcement.';drawBoards();drawTimeline();drawOverview();drawExpanded();moveCursors();drawWholeBoard();drawAverage();if(A)inspectAverage(averageColumn,selected,selectedDigit)}
 function hit(canvas,event){const rect=canvas.getBoundingClientRect(),x=(event.clientX-rect.left)*canvas.width/rect.width,y=(event.clientY-rect.top)*canvas.height/rect.height;return {fi:columns[Math.floor((x-labelWidth)/width)],row:Math.floor(y/rowHeight)}}
 ['overview','expanded'].forEach(id=>{const canvas=$(id);canvas.onmousemove=e=>{if($('pin').checked)return;const h=hit(canvas,e),c=id==='overview'?rows[h.row]:selected,d=id==='overview'?D.reference[c]:h.row;if(h.fi!==undefined&&c!==undefined&&d>=0&&d<side)inspect(h.fi,c,d)};canvas.onclick=e=>{const h=hit(canvas,e);if(h.fi===undefined)return;const c=id==='overview'?rows[h.row]:selected,d=id==='overview'?D.reference[c]:h.row;if(c===undefined||d<0||d>=side)return;selectedColumn=h.fi;selectCell(c,d)}});
 $('timeline').onclick=e=>{const h=hit($('timeline'),e);if(h.fi!==undefined)selectTime(h.fi)};

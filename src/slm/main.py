@@ -78,6 +78,13 @@ def build_train_command(commands):
 def build_report_command(commands):
     parser = commands.add_parser("report", help="Evaluate saved weights")
     text8, sudoku = add_tasks(parser)
+    for task in (text8, sudoku):
+        task.add_argument("--sampling-seed", type=int,
+                          help="First report seed (defaults to the existing test/sample seeds)")
+        task.add_argument("--sampling-seeds", type=positive_int, default=1,
+                          help="Number of independent consecutive-seed runs to average")
+        task.add_argument("--protected-prune-step", action="store_true",
+                          help="Use shared protected pruning for Sudoku evaluation and generated samples")
     text8.add_argument("--report", choices=("default",), default="default")
     sudoku.add_argument(
         "--report", choices=("default", "sweep", "heatmap"), default="default",
@@ -88,11 +95,8 @@ def build_report_command(commands):
     )
     sudoku.add_argument("--board-id", type=int, default=0, help="Heatmap: zero-based index in the selected test split")
     sudoku.add_argument("--weights", choices=("ema", "raw"), default="ema", help="Heatmap: checkpoint weights to inspect")
-    sudoku.add_argument("--sampling-seed", type=int, help="Heatmap: first sampling seed (defaults to SAMPLE_SEED)")
-    sudoku.add_argument("--sampling-seeds", type=positive_int, default=1,
-                        help="Heatmap: number of consecutive seeds to average for the same board")
-    sudoku.add_argument("--sampling-steps", type=positive_int, help="Heatmap: sampling budget (defaults to report_steps or sample_steps)")
-    sudoku.add_argument("--protected-prune-step", action="store_true", help="Use protected prune step instead of original")
+    sudoku.add_argument("--sampling-steps", type=positive_int,
+                        help="Default/heatmap sampling budget (defaults to report_steps or sample_steps)")
 
 
 def build_smoke_command(commands):

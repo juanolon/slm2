@@ -14,6 +14,8 @@ from slm.slm.core import (
     sample_steps,
 )
 
+from slm.slm.sampling import protected_prune_step
+
 from .data import gather_windows
 
 
@@ -96,9 +98,11 @@ class Text8Evaluator:
 
 
 def generate(
-    model, batch, length, vocabulary_size, steps, device="cpu", return_history=False
+    model, batch, length, vocabulary_size, steps, device="cpu", return_history=False,
+    *, use_protected_prune_step=False,
 ):
     assert steps >= 1
+    pruning = protected_prune_step if use_protected_prune_step else prune_step
     old = model.training
     model.eval()
     try:
@@ -114,7 +118,7 @@ def generate(
                 earlier = torch.full(
                     (batch,), (index - 1) / steps, dtype=torch.float64, device=device
                 )
-                candidates = prune_step(model, candidates, earlier, time)
+                candidates = pruning(model, candidates, earlier, time)
                 if return_history:
                     history.append(candidates.sum(-1).cpu())
             tokens = predict_log_probs(

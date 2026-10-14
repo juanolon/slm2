@@ -12,6 +12,7 @@ import torch
 
 from slm.common.checkpoint import CheckpointManager, load_checkpoint
 from slm.common.contracts import Report
+from slm.common.reporting import mean_scores, sampling_settings
 from slm.common.seeds import SAMPLE_SEED, TEST_SEED
 from slm.common.tracking import ExperimentTracker
 from slm.slm.backbone import BFN_DIT
@@ -26,27 +27,43 @@ class DefaultReport(Report):
     """Basic single-budget scores and samples, without trajectory diagnostics."""
 
     def run(self, args: Namespace) -> dict[str, Any]:
-        steps = args.config.sudoku.get(
-            "report_steps", args.config.sudoku["sample_steps"]
-        )
+        sampling = sampling_settings(args, TEST_SEED)
+        steps = getattr(args, "sampling_steps", None)
+        if steps is None:
+            steps = args.config.sudoku.get(
+                "report_steps", args.config.sudoku["sample_steps"]
+            )
         if type(steps) is not int or steps < 1:
             raise ValueError("sudoku.report_steps must be a positive integer")
         config, model, test, completed, checkpoint_fingerprint, tracking = _load_report(
             args
         )
-        evaluation_config = SimpleNamespace(**{**vars(config), "sample_steps": steps})
+        evaluation_config = SimpleNamespace(
+            **{**vars(config), "sample_steps": steps, **sampling}
+        )
         device = torch.device(args.device)
-        scores = evaluate_sudoku(model, test, evaluation_config, device, seed=TEST_SEED)
+        by_seed = [
+            {"seed": seed, "scores": evaluate_sudoku(
+                model, test, evaluation_config, device, seed=seed
+            )}
+            for seed in sampling["sampling_seed_list"]
+        ]
+        scores = mean_scores([run["scores"] for run in by_seed])
+        sample_seeds = sampling_settings(args, SAMPLE_SEED)["sampling_seed_list"]
         report = {
             "scores": scores,
             "boards": len(test["questions"]),
-            "seed": TEST_SEED,
+            "seed": sampling["sampling_seed"],
+            **sampling,
+            "sample_seed_list": sample_seeds,
             "sample_steps": steps,
             "checkpoint_step": completed,
             "max_rating": config.max_rating,
             "dataset_fingerprint": data_fingerprint({"test": test}),
             "checkpoint_dataset_fingerprint": checkpoint_fingerprint,
         }
+        if len(by_seed) > 1:
+            report["by_seed"] = by_seed
         report_path, tracker = _start_report(
             args, vars(evaluation_config), report, tracking
         )
@@ -59,22 +76,26 @@ class DefaultReport(Report):
                 tracker.run.summary[f"test/{key}"] = value
             count = min(4, config.microbatch, len(test["questions"]))
             questions = test["questions"][:count].to(device)
-            predictions = solve_sudoku(
-                model,
-                questions,
-                steps,
-                torch.Generator(device=device).manual_seed(SAMPLE_SEED),
+            samples = []
+            pruning_options = (
+                {"use_protected_prune_step": True}
+                if sampling["protected_prune_step"] else {}
             )
-            samples = [
-                [
-                    decode_board(question.cpu()),
-                    decode_board(prediction.cpu()),
-                    decode_board(answer),
-                ]
+            for seed in sample_seeds:
+                predictions = solve_sudoku(
+                    model, questions, steps,
+                    torch.Generator(device=device).manual_seed(seed),
+                    **pruning_options,
+                )
                 for question, prediction, answer in zip(
                     questions, predictions, test["answers"][:count]
-                )
-            ]
+                ):
+                    row = [
+                        decode_board(question.cpu()),
+                        decode_board(prediction.cpu()),
+                        decode_board(answer),
+                    ]
+                    samples.append([seed, *row] if len(sample_seeds) > 1 else row)
             (Path(args.run_dir) / "sudoku_samples.json").write_text(
                 json.dumps(samples, indent=2)
             )
@@ -86,7 +107,8 @@ class DefaultReport(Report):
             tracker.artifact(
                 "samples/sudoku",
                 wandb.Table(
-                    columns=["question", "prediction", "reference"],
+                    columns=(["seed"] if len(sample_seeds) > 1 else [])
+                    + ["question", "prediction", "reference"],
                     data=samples,
                 ),
             )
@@ -101,17 +123,22 @@ class DefaultReport(Report):
 
 class SweepReport(Report):
     def run(self, args: Namespace) -> dict[str, Any]:
+        sampling = sampling_settings(args, TEST_SEED)
         config, model, test, completed, checkpoint_fingerprint, tracking = _load_report(
             args
         )
         run_path = Path(args.run_dir)
         results = evaluate_report(
-            model, test, config, torch.device(args.device), budgets=REPORT_STEPS
+            model, test, config, torch.device(args.device), budgets=REPORT_STEPS,
+            seed=sampling["sampling_seed"],
+            sampling_seeds=sampling["sampling_seeds"],
+            use_protected_prune_step=sampling["protected_prune_step"],
         )
         report = {
             "by_steps": results,
             "boards": len(test["questions"]),
-            "seed": TEST_SEED,
+            "seed": sampling["sampling_seed"],
+            **sampling,
             "sampling_budgets": list(REPORT_STEPS),
             "checkpoint_step": completed,
             "max_rating": config.max_rating,
@@ -120,7 +147,7 @@ class SweepReport(Report):
         }
         report_path, tracker = _start_report(
             args,
-            {**vars(config), "report_steps": list(REPORT_STEPS)},
+            {**vars(config), "report_steps": list(REPORT_STEPS), **sampling},
             report,
             tracking,
         )
@@ -219,14 +246,58 @@ def _start_report(args, config, report, tracking):
     return report_path, tracker
 
 
-def evaluate_report(model, split, config, device, budgets=REPORT_STEPS):
+def evaluate_report(
+    model, split, config, device, budgets=REPORT_STEPS, *, seed=TEST_SEED,
+    sampling_seeds=1, use_protected_prune_step=False,
+):
+    if type(sampling_seeds) is not int or sampling_seeds < 1:
+        raise ValueError("sampling-seeds must be a positive integer")
+    runs = [
+        _evaluate_report(
+            model, split, config, device, budgets, seed + index,
+            use_protected_prune_step,
+        )
+        for index in range(sampling_seeds)
+    ]
+    if sampling_seeds == 1:
+        return runs[0]
+    results = {}
+    for budget, first in runs[0].items():
+        groups = {}
+        for rating, group in first["groups"].items():
+            peers = [run[budget]["groups"][rating] for run in runs]
+            groups[rating] = {
+                "boards": group["boards"],
+                "scores": mean_scores([peer["scores"] for peer in peers]),
+                "trajectory": {
+                    key: values if key == "step" else [
+                        sum(peer["trajectory"][key][i] for peer in peers) / sampling_seeds
+                        for i in range(len(values))
+                    ]
+                    for key, values in group["trajectory"].items()
+                },
+            }
+        results[budget] = {
+            "groups": groups,
+            "samples": [
+                [seed + index, *sample]
+                for index, run in enumerate(runs)
+                for sample in run[budget]["samples"]
+            ],
+        }
+    return results
+
+
+def _evaluate_report(
+    model, split, config, device, budgets, seed, use_protected_prune_step
+):
     count = len(split["questions"])
     if count < 1:
         raise ValueError("No evaluation boards")
     ratings = sorted(split["ratings"].unique().tolist())
     result = {}
     for steps in budgets:
-        generator = torch.Generator(device=device).manual_seed(TEST_SEED)
+        generator = torch.Generator(device=device).manual_seed(seed)
         groups = {
             "all": {"boards": count},
             **{
@@ -261,7 +332,8 @@ def evaluate_report(model, split, config, device, budgets=REPORT_STEPS):
                 for_boards[index] = survives.all(-1)
 
             predictions = solve_sudoku(
-                model, questions, steps, generator, observer=observe
+                model, questions, steps, generator, observer=observe,
+                **({"use_protected_prune_step": True} if use_protected_prune_step else {}),
             )
             scores = {
                 key: values.cpu()
@@ -325,6 +397,7 @@ def evaluate_report(model, split, config, device, budgets=REPORT_STEPS):
             json.dumps(
                 {
                     "sampling_steps": steps,
+                    "sampling_seed": seed,
                     "boards": count,
                     "scores_by_rating": {
                         key: group["scores"] for key, group in groups.items()
@@ -392,7 +465,8 @@ def log_report(tracker, completed, results):
         tracker.artifact(
             f"samples/sudoku-{steps}",
             wandb.Table(
-                columns=["question", "prediction", "reference", "rating"],
+                columns=(["seed"] if result["samples"] and len(result["samples"][0]) == 5 else [])
+                + ["question", "prediction", "reference", "rating"],
                 data=result["samples"],
             ),
         )
