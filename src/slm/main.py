@@ -92,6 +92,7 @@ def build_report_command(commands):
     sudoku.add_argument("--sampling-seeds", type=positive_int, default=1,
                         help="Heatmap: number of consecutive seeds to average for the same board")
     sudoku.add_argument("--sampling-steps", type=positive_int, help="Heatmap: sampling budget (defaults to report_steps or sample_steps)")
+    sudoku.add_argument("--protected-prune-step", action="store_true", help="Use protected prune step instead of original")
 
 
 def build_smoke_command(commands):

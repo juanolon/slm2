@@ -69,8 +69,57 @@ def prune_step(model, candidate_mask, earlier_time, time, generator=None):
             else [],
         }
 
+def protected_prune_step(model, candidate_mask, earlier_time, time, generator=None):
+    with torch.no_grad():
+        clean_probabilities = (
+            predict_log_probs(model, candidate_mask, time.float()).double().exp()
+        )
 
-def solve_sudoku(model, questions, steps, generator=None, observer=None):
+        clean_probabilities = clean_probabilities.masked_fill(
+            ~candidate_mask, 0.0
+        )
+
+        protected_digit = torch.multinomial(
+            clean_probabilities.reshape(
+                -1, clean_probabilities.shape[-1]
+            ),
+            num_samples=1,
+            generator=generator,
+        ).reshape(*clean_probabilities.shape[:-1], 1)
+
+        protected_probabilities = torch.zeros_like(clean_probabilities)
+        protected_probabilities.scatter_(-1, protected_digit, 1.0)
+
+        probs = reverse_probs(
+            clean_probabilities, candidate_mask, earlier_time.double(), time.double()
+        )
+        uniform_draws = torch.rand(
+            probs.shape, dtype=torch.float64, device=probs.device, generator=generator
+        )
+        sampled = uniform_draws < probs
+
+        survivors =  sampled & candidate_mask
+
+        # Explicitly enforce protection; no empty-set repair is needed.
+        survivors.scatter_(-1, protected_digit, True)
+
+        repaired = repair_empty(sampled, probs)
+        changes = _changes(sampled, repaired)
+
+        return repaired, {
+            "before": candidate_mask[0].cpu().tolist(),
+            "model_probability": clean_probabilities[0].cpu().tolist(),
+            "retention_probability": probs[0].cpu().tolist(),
+            "draws": uniform_draws[0].cpu().tolist(),
+            "sampled": sampled[0].cpu().tolist(),
+            "repaired": repaired[0].cpu().tolist(),
+            "events": [{"kind": "empty_set_repair", "changes": changes}]
+            if changes
+            else [],
+        }
+
+
+def solve_sudoku(model, questions, steps, generator=None, use_protected_prune_step=False, observer=None):
     """Mirror evaluation.solve_sudoku for one board, returning recorded frames too."""
     if questions.ndim != 2 or len(questions) != 1 or questions.shape[1] not in (16, 81):
         raise ValueError("Expected one 4x4 or 9x9 question, with shape (1, cells)")
@@ -113,9 +162,15 @@ def solve_sudoku(model, questions, steps, generator=None, observer=None):
                     device=questions.device,
                 )
                 earlier = torch.full_like(time, (index - 1) / steps)
-                candidates, frame = prune_step(
-                    model, candidates, earlier, time, generator
-                )
+
+                if use_protected_prune_step:
+                    candidates, frame = protected_prune_step(
+                        model, candidates, earlier, time, generator
+                    )
+                else:
+                    candidates, frame = prune_step(
+                        model, candidates, earlier, time, generator
+                    )
                 before_enforcement = candidates
                 candidates = clamp_clues(candidates, questions)
                 changes = _changes(before_enforcement, candidates)
@@ -290,7 +345,7 @@ class HeatmapReport(Report):
             generator = torch.Generator(device=device_question.device).manual_seed(
                 sampling_seed
             )
-            trajectory = solve_sudoku(model, device_question[None], steps, generator)
+            trajectory = solve_sudoku(model, device_question[None], steps, generator, getattr(args, "protected_prune_step", False))
             prediction = torch.tensor(trajectory["prediction"], dtype=torch.long)
             runs.append(
                 {
