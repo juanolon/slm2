@@ -78,6 +78,7 @@ def sample_trajectory(model, question, steps, seed=SAMPLE_SEED):
                     device=question.device,
                 )
                 earlier = torch.full_like(time, (steps - step) / steps)
+                # TODO: add temperature to predict_log_probs
                 clean = (
                     predict_log_probs(model, candidates, time.float()).double().exp()
                 )
@@ -187,11 +188,53 @@ def analyse_trajectory(trajectory, question, reference):
     return cells
 
 
+def average_trajectories(runs, question, reference):
+    """Mean probabilities and mask frequencies, never a fabricated discrete path."""
+    blanks = [c for c, digit in enumerate(question) if digit < 0]
+    frames = []
+    for index, template in enumerate(runs[0]["frames"]):
+        samples = [run["frames"][index] for run in runs]
+        frame = {
+            key: template[key]
+            for key in ("kind", "step", "time", "earlier_time", "reverse_survival_ratio")
+        }
+        for field in ("model_probability", "retention_probability"):
+            frame[field] = (
+                torch.tensor([sample[field] for sample in samples], dtype=torch.float64)
+                .mean(0).tolist()
+                if template[field] is not None else None
+            )
+        for field in ("before", "after"):
+            frame[f"{field}_frequency"] = (
+                torch.tensor([sample[field] for sample in samples], dtype=torch.float64)
+                .mean(0).tolist()
+            )
+        frame["mean_candidate_count"] = [sum(mask) for mask in frame["after_frequency"]]
+        frame["reference_survival"] = [
+            mask[digit] for mask, digit in zip(frame["after_frequency"], reference)
+        ]
+        frame["singleton_frequency"] = [
+            sum(sum(sample["after"][c]) == 1 for sample in samples) / len(samples)
+            for c in range(len(question))
+        ]
+        frame["reference_board_survival"] = sum(
+            all(sample["after"][c][reference[c]] for c in blanks) for sample in samples
+        ) / len(samples)
+        frames.append(frame)
+    prediction_frequency = torch.nn.functional.one_hot(
+        torch.tensor([run["prediction"] for run in runs]), len(runs[0]["frames"][0]["after"][0])
+    ).double().mean(0).tolist()
+    return {"frames": frames, "prediction_frequency": prediction_frequency}
+
+
 class HeatmapReport(Report):
     def run(self, args: Namespace) -> dict[str, Any]:
         board_id = getattr(args, "board_id", 0)
         if board_id < 0:
             raise ValueError("board-id must be a nonnegative test-split index")
+        seed_count = getattr(args, "sampling_seeds", 1)
+        if type(seed_count) is not int or seed_count < 1:
+            raise ValueError("sampling-seeds must be a positive integer")
         weights = getattr(args, "weights", "ema")
         config, model, test, completed, fingerprint, tracking = _load_report(
             args, weights=weights
@@ -207,15 +250,26 @@ class HeatmapReport(Report):
         if seed is None:
             seed = SAMPLE_SEED
         question, answer = test["questions"][board_id], test["answers"][board_id]
-        trajectory = sample_trajectory(model, question.to(args.device), steps, seed)
         q, ref = question.tolist(), answer.tolist()
-        cells = analyse_trajectory(trajectory, q, ref)
-        prediction = torch.tensor(trajectory["prediction"], dtype=torch.long)
+        device_question = question.to(args.device)
+        seeds = [seed + index for index in range(seed_count)]
+        runs = []
+        for sampling_seed in seeds:
+            trajectory = sample_trajectory(model, device_question, steps, sampling_seed)
+            prediction = torch.tensor(trajectory["prediction"], dtype=torch.long)
+            runs.append({
+                "seed": sampling_seed,
+                **trajectory,
+                "cells": analyse_trajectory(trajectory, q, ref),
+                "scores": {
+                    key: value.item() for key, value in sudoku_scores(
+                        prediction[None], question[None], answer[None]
+                    ).items()
+                },
+            })
         scores = {
-            key: value.item()
-            for key, value in sudoku_scores(
-                prediction[None], question[None], answer[None]
-            ).items()
+            key: sum(run["scores"][key] for run in runs) / seed_count
+            for key in runs[0]["scores"]
         }
         metadata = {
             "board_id": board_id,
@@ -228,7 +282,10 @@ class HeatmapReport(Report):
             "checkpoint_dataset_fingerprint": fingerprint,
             "weights": weights,
             "sampling_seed": seed,
-            "sampling_scope": "one board with an independent RNG stream (not a replay of the batched sweep)",
+            "sampling_seeds": seed_count,
+            "sampling_seed_list": seeds,
+            "sampling_scope": "same board, independent seed streams (not a replay of the batched sweep)",
+            "sampling_steps": steps,
             "sampling_budget": steps,
             "interventions": {
                 "clue_enforcement": True,
@@ -242,13 +299,18 @@ class HeatmapReport(Report):
             "question": q,
             "reference": ref,
             "vocab": config.vocab,
-            **trajectory,
-            "cells": cells,
             "scores": scores,
         }
-        report = {"metadata": metadata, "scores": scores, "html": "trajectory.html"}
+        if seed_count == 1:
+            payload.update(runs[0])
+        else:
+            payload.update(runs=runs, average=average_trajectories(runs, q, ref))
+        report = {
+            "metadata": metadata, "scores": scores, "html": "trajectory.html",
+            "by_seed": [{"seed": run["seed"], "scores": run["scores"]} for run in runs],
+        }
         report_path, tracker = _start_report(
-            args, {**vars(config), **metadata}, report, tracking
+            args, {**vars(config), "sample_steps": steps, **metadata}, report, tracking
         )
         html_path = report_path / "trajectory.html"
         try:
@@ -266,23 +328,26 @@ class HeatmapReport(Report):
 def log_wandb(tracker, completed, data):
     import wandb
 
+    runs = data.get("runs", [data])
+    count = len(runs)
+
     for key, value in data["metadata"].items():
         tracker.run.summary[f"heatmap/{key}"] = value
     tracker.log(
         completed,
         {f"report/heatmap/{key}": value for key, value in data["scores"].items()},
     )
-    steps = [frame["step"] for frame in data["frames"]]
+    steps = [frame["step"] for frame in runs[0]["frames"]]
     blanks = [i for i, digit in enumerate(data["question"]) if digit < 0]
     survival = [
-        sum(frame["after"][i][data["reference"][i]] for i in blanks) / len(blanks)
-        if blanks
-        else 1.0
-        for frame in data["frames"]
+        sum(run["frames"][column]["after"][i][data["reference"][i]]
+            for run in runs for i in blanks) / (count * len(blanks)) if blanks else 1.0
+        for column in range(len(steps))
     ]
     counts = [
-        sum(sum(frame["after"][i]) for i in blanks) / len(blanks) if blanks else 0.0
-        for frame in data["frames"]
+        sum(sum(run["frames"][column]["after"][i]) for run in runs for i in blanks)
+        / (count * len(blanks)) if blanks else 0.0
+        for column in range(len(steps))
     ]
     for name, values in (
         ("reference_cell_survival", survival),
@@ -298,7 +363,7 @@ def log_wandb(tracker, completed, data):
                 xname="sampling column (0=initial, N+1=decode)",
             ),
         )
-    transitions = [frame for frame in data["frames"] if frame["kind"] == "transition"]
+    transitions = [frame for frame in runs[0]["frames"] if frame["kind"] == "transition"]
     tracker.artifact(
         "heatmap/reverse_survival_ratio",
         wandb.plot.line_series(
@@ -310,7 +375,7 @@ def log_wandb(tracker, completed, data):
         ),
     )
     kinds = sorted(
-        {event["kind"] for frame in data["frames"] for event in frame["events"]}
+        {event["kind"] for run in runs for frame in run["frames"] for event in frame["events"]}
     )
     if kinds:
         tracker.artifact(
@@ -321,21 +386,22 @@ def log_wandb(tracker, completed, data):
                     [
                         sum(
                             len(event["changes"])
-                            for event in frame["events"]
+                            for run in runs for event in run["frames"][column]["events"]
                             if event["kind"] == kind
-                        )
-                        for frame in data["frames"]
+                        ) / count
+                        for column in range(len(steps))
                     ]
                     for kind in kinds
                 ],
                 keys=kinds,
-                title="Cells modified by interventions",
+                title="Mean cells modified by interventions per seed",
                 xname="sampling column (0=initial, N+1=decode)",
             ),
         )
     side = data["vocab"]
     events = [
         [
+            run["seed"],
             frame["step"],
             frame["time"],
             event["kind"],
@@ -347,7 +413,8 @@ def log_wandb(tracker, completed, data):
             str(change["before"]),
             str(change["after"]),
         ]
-        for frame in data["frames"]
+        for run in runs
+        for frame in run["frames"]
         for event in frame["events"]
         for change in event["changes"]
     ]
@@ -355,6 +422,7 @@ def log_wandb(tracker, completed, data):
         "heatmap/events",
         wandb.Table(
             columns=[
+                "seed",
                 "step",
                 "time_before",
                 "intervention",
@@ -371,17 +439,19 @@ def log_wandb(tracker, completed, data):
     )
     failures = [
         [
+            run["seed"],
             cell["cell"],
             cell["cell"] // side + 1,
             cell["cell"] % side + 1,
             cell["reference"] + 1,
-            data["prediction"][cell["cell"]] + 1,
+            run["prediction"][cell["cell"]] + 1,
             cell["first_loss"],
             cell["wrong_singleton"],
             str(cell["interventions"]),
             cell["multiple_until_decode"],
         ]
-        for cell in data["cells"]
+        for run in runs
+        for cell in run["cells"]
         if cell["first_loss"] is not None
         or cell["wrong_singleton"] is not None
         or cell["interventions"]
@@ -392,6 +462,7 @@ def log_wandb(tracker, completed, data):
         "heatmap/failures",
         wandb.Table(
             columns=[
+                "seed",
                 "cell",
                 "row",
                 "column",
@@ -405,14 +476,23 @@ def log_wandb(tracker, completed, data):
             data=failures,
         ),
     )
-    strings = [
-        decode_board(torch.tensor(data[key], dtype=torch.long))
-        for key in ("question", "reference", "prediction")
-    ]
+    question = decode_board(torch.tensor(data["question"], dtype=torch.long))
+    reference = decode_board(torch.tensor(data["reference"], dtype=torch.long))
     tracker.artifact(
         "heatmap/board",
-        wandb.Table(columns=["question", "reference", "prediction"], data=[strings]),
+        wandb.Table(
+            columns=["seed", "question", "reference", "prediction"],
+            data=[[run["seed"], question, reference,
+                   decode_board(torch.tensor(run["prediction"], dtype=torch.long))] for run in runs],
+        ),
     )
+    if count > 1:
+        keys = list(data["scores"])
+        tracker.artifact(
+            "heatmap/seed_scores",
+            wandb.Table(columns=["seed", *keys],
+                        data=[[run["seed"], *[run["scores"][key] for key in keys]] for run in runs]),
+        )
 
 
 def write_html(path: Path, data):
@@ -431,6 +511,14 @@ body{font:14px system-ui,sans-serif;margin:20px;color:#172033;background:#f8fafc
 .metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px}.metric{background:#eff6ff;border:1px solid #bfdbfe;padding:12px;border-radius:5px}.metric strong,.metric span{display:block}.metric span{font-size:17px;margin-top:5px;overflow-wrap:anywhere}.danger{color:#b91c1c}.good{color:#15803d}.candidate-board{display:grid;gap:2px;background:#334155;border:2px solid #334155;max-width:950px;min-width:450px}.candidate-cell{background:#fff;min-height:90px;padding:7px;cursor:pointer}.candidate-cell.clue{background:#e2e8f0}.candidate-cell.peer{background:#f3e8ff}.candidate-cell.selected{box-shadow:inset 0 0 0 3px #f59e0b}.candidate-cell.lost{border-bottom:3px solid #dc2626}.candidate-cell.lost .cell-caption{color:#b91c1c}.candidate-digits{display:grid;gap:2px;min-height:54px;align-content:center}.candidate-digit{border:1px solid #cbd5e1;border-radius:3px;padding:1px;cursor:pointer;font-size:12px}.candidate-digit.reference{border:2px solid #16a34a}.candidate-digit.decoded{outline:2px solid #f59e0b}.candidate-cell.singleton .candidate-digit{font-size:30px}.cell-caption{font-size:11px;margin:3px 0;overflow-wrap:anywhere}.table-scroll{overflow:auto;max-height:480px}table{border-collapse:collapse;width:100%;font-size:12px}th,td{padding:7px;text-align:left;border:1px solid #cbd5e1;white-space:nowrap}th{background:#e2e8f0;position:sticky;top:0}tr.selected{background:#fff0c2}tr.peer{background:#f3e8ff}tbody tr{cursor:pointer}#stepSlider{width:min(650px,70vw)}details{margin-top:10px}#frameSummary{font-weight:bold}
 </style></head><body>
 <h1>Sudoku sampling trajectory</h1>
+<section id="averageSection" hidden><h2 id="averageTitle">Average across seeds</h2><pre id="averageSummary"></pre><details><summary>Per-seed scores</summary><pre id="averageOutcomes"></pre></details>
+<p>Colors are arithmetic mean probabilities across all seeds, including mask-forced zeros. Counts are mean candidate counts. The candidate board shows digits present in <b>any</b> seed, with exact survival counts underneath (surviving seeds / total seeds). It is not one sampled board. No majority-vote solution is used to calculate scores. A bold overview border means every seed is a singleton; a bold expanded border means that digit survives in every seed.</p>
+<label>Mean probability <select id="averageMode"><option value="model_probability">Model digit probability</option><option value="retention_probability">Sampler retention probability</option></select></label><label><input id="averagePin" type="checkbox">Pin mean inspector</label>
+<div id="averageTimelineScroll" class="scroll"><canvas id="averageTimeline"></canvas><div id="averageTimelineCursor" class="time-cursor"></div></div>
+<h3>Mean reference-digit probability (blank cells)</h3><div id="averageOverviewScroll" class="scroll"><canvas id="averageOverview"></canvas><div id="averageOverviewCursor" class="time-cursor"></div></div>
+<h3 id="averageExpandedTitle">Mean candidate probabilities</h3><div id="averageExpandedScroll" class="scroll"><canvas id="averageExpanded"></canvas><div id="averageExpandedCursor" class="time-cursor"></div></div><pre id="averageInspection"></pre>
+<h3>Candidate survival frequencies through time</h3><label>Time <input id="averageSlider" type="range" min="0" step="1" value="0"></label><label>Candidate state <select id="averageStage"><option value="after_frequency">After transition</option><option value="before_frequency">Before transition</option></select></label><p id="averageFrameLabel"></p><p id="averageFrameSummary"></p><div class="scroll"><div id="averageBoard" class="candidate-board"></div></div></section>
+<details id="individualTrajectory" open><summary><b>Individual seed trajectory</b> — actual candidates, draws and interventions</summary><label>Seed <select id="seedSelect"></select></label>
 <section><h2>Identity and outcome</h2><pre id="metadata"></pre><div id="boards" class="boards"></div></section>
 <section><h2>Probability and cell filters</h2>
 <label>Probability <select id="mode"><option value="model_probability">Model digit probability (masked, normalized)</option><option value="retention_probability">Sampler retention probability (Bernoulli inclusion)</option></select></label>
@@ -446,17 +534,22 @@ body{font:14px system-ui,sans-serif;margin:20px;color:#172033;background:#f8fafc
 <section><h2>Box inspection</h2><label><input id="pin" type="checkbox">Pin inspection (clicking a box pins it)</label><p class="hint">Hover previews a single box without moving the board's selected time. Click a box to pin it and synchronize the board below. Uncheck Pin to resume hover previews.</p><div id="inspection"></div><details><summary>Intermediate candidate sets and actual interventions</summary><pre id="inspectionDetails"></pre></details></section>
 <section><h2>Whole-board candidates through time</h2><label>Time <input id="stepSlider" type="range" min="0" step="1" value="0"></label><button id="previousStep">Previous</button> <button id="nextStep">Next</button><p id="frameLabel"></p><label>Candidate state <select id="stage"><option value="after">After transition</option><option value="before">Before transition</option></select></label><p id="frameSummary"></p><p>Each cell shows all candidates at the selected state; the sets shrink and singletons become large digits. n = candidate count, −/+ = removed/added counts, ★ = actual forced change. Cell positions stay fixed. Colors still use probabilities <b>before</b> the selected transition. Green digit border = reference; gold = final decoded digit. Purple cells share the selected cell's row, column or box (structural peers, not all attention connections).</p><div class="scroll"><div id="candidateBoard" class="candidate-board"></div></div>
 <h3>Cross-cell comparison at this time</h3><label>Probability target <select id="compareTarget"><option value="reference">Reference digit in each cell</option><option value="selected">Selected digit across all cells</option></select></label><label><input id="changedOnly" type="checkbox">Only changed/intervened cells</label><p id="compareScope"></p><div class="table-scroll"><table><thead><tr><th>Cell</th><th>Target</th><th>Before candidates</th><th>After candidates</th><th>Removed / added</th><th>Model p before</th><th>Retention q</th><th>Model p next call</th><th>Δ model p</th></tr></thead><tbody id="comparisonRows"></tbody></table></div></section>
+</details>
 <script id="trajectory" type="application/json">__TRAJECTORY_DATA__</script>
 <script>
 'use strict';
-const D=JSON.parse(document.getElementById('trajectory').textContent), F=D.frames, side=D.vocab;
+const DATA=JSON.parse(document.getElementById('trajectory').textContent), RUNS=DATA.runs??[DATA], A=DATA.average, side=DATA.vocab;
+let D={...DATA,...RUNS[0]}, F=D.frames, averageColumn=0;
 const $=id=>document.getElementById(id), cellName=c=>'r'+(Math.floor(c/side)+1)+'c'+(c%side+1), digits=m=>m.flatMap((v,i)=>v?[i+1]:[]);
 let selected=D.question.findIndex(v=>v<0), selectedColumn=0, selectedDigit=0, columns=[], rows=[], width=20;
 if(selected<0)selected=0;selectedDigit=D.reference[selected];
 const labelWidth=140, rowHeight=24;
 columns=F.map((_,i)=>i);
-$('metadata').textContent=JSON.stringify({...D.metadata,scores:D.scores},null,2);
+$('metadata').textContent=JSON.stringify({...D.metadata,selected_seed:D.seed,scores:D.scores},null,2);
 $('stepSlider').max=F.length-1;
+$('averageSection').hidden=!A;$('individualTrajectory').open=!A;
+RUNS.forEach((run,index)=>{const option=document.createElement('option');option.value=index;option.textContent='Seed '+run.seed;$('seedSelect').appendChild(option)});$('seedSelect').value='0';
+if(A){$('averageSlider').max=A.frames.length-1;$('averageTitle').textContent='Average across '+RUNS.length+' seeds';$('averageSummary').textContent=JSON.stringify({board_id:DATA.metadata.board_id,board_key:DATA.metadata.board_key,seeds:DATA.metadata.sampling_seed_list,sampling_steps:DATA.metadata.sampling_steps,mean_scores:DATA.scores},null,2);$('averageOutcomes').textContent=JSON.stringify(RUNS.map(run=>({seed:run.seed,scores:run.scores})),null,2)}
 function matches(c){const a=D.cells[c], f=$('filter').value;return f==='all'||f==='lost'&&a.first_loss!==null||f==='wrong'&&a.wrong_singleton!==null||f==='intervention'&&a.interventions.length>0||f==='multiple'&&a.multiple_until_decode}
 function columnLabel(f){return f.kind==='initial'?'initial t=1 s=—':f.kind==='decode'?'decode t=0 s=—':'step '+f.step+' t='+f.time.toFixed(4)+' s='+f.reverse_survival_ratio.toFixed(4)}
 function cellEvents(f,c,d=null){return f.events.flatMap(e=>e.changes.filter(a=>a.cell===c&&(d===null||a.added.includes(d+1)||a.removed.includes(d+1))).map(a=>({kind:e.kind,...a})))}
@@ -523,11 +616,11 @@ function paint(ctx,x,y,c,d,f,compact){const p=f[$('mode').value]?.[c][d];const m
 function moveCursors(){['timelineCursor','overviewCursor','expandedCursor'].forEach(id=>{$(id).style.left=(labelWidth+selectedColumn*width)+'px';$(id).style.width=width+'px'})}
 function drawOverview(){const ctx=prepare($('overview'),Math.max(30,rows.length*rowHeight));rows.forEach((c,r)=>{const y=r*rowHeight;ctx.fillStyle=c===selected?'#fff0c2':'#f1f5f9';ctx.fillRect(0,y,labelWidth,rowHeight);ctx.fillStyle='#172033';ctx.fillText(cellName(c)+' ref '+(D.reference[c]+1)+(D.question[c]>=0?' [clue]':''),5,y+17);columns.forEach((fi,i)=>paint(ctx,labelWidth+i*width,y,c,D.reference[c],F[fi],true));if(c===selected){ctx.strokeStyle='#f59e0b';ctx.lineWidth=2;ctx.strokeRect(1,y+1,$('overview').width-2,rowHeight-2)}});$('empty').textContent=rows.length?'':'No cells match this filter.'}
 function drawExpanded(){const ctx=prepare($('expanded'),side*rowHeight);$('expandedTitle').textContent='Expanded '+cellName(selected)+' — reference digit '+(D.reference[selected]+1);for(let d=0;d<side;d++){const y=d*rowHeight;ctx.fillStyle=d===D.reference[selected]?'#fef3c7':'#f1f5f9';ctx.fillRect(0,y,labelWidth,rowHeight);ctx.fillStyle='#172033';ctx.fillText((d===D.reference[selected]?'★ reference ':'digit ')+(d+1),5,y+17);columns.forEach((fi,i)=>paint(ctx,labelWidth+i*width,y,selected,d,F[fi],false))}}
-function drawTimeline(){
- const ctx=prepare($('timeline'),240);ctx.fillStyle='#172033';ctx.fillText('reverse survival s',3,212);
- columns.forEach((fi,i)=>{const x=labelWidth+i*width,f=F[fi];ctx.save();ctx.translate(x+width/2,178);ctx.rotate(-Math.PI/2);ctx.fillText(columnLabel(f),0,0);ctx.restore();if(f.events.length){ctx.fillStyle='#b45309';ctx.fillText('★',x+1,237);ctx.fillStyle='#172033'}});
+function drawTimeline(id='timeline',frames=F){
+ const ctx=prepare($(id),240);ctx.fillStyle='#172033';ctx.fillText('reverse survival s',3,212);
+ columns.forEach((fi,i)=>{const x=labelWidth+i*width,f=frames[fi];ctx.save();ctx.translate(x+width/2,178);ctx.rotate(-Math.PI/2);ctx.fillText(columnLabel(f),0,0);ctx.restore();if(f.events?.length){ctx.fillStyle='#b45309';ctx.fillText('★',x+1,237);ctx.fillStyle='#172033'}});
  ctx.strokeStyle='#2563eb';ctx.lineWidth=2;ctx.beginPath();let started=false;
- columns.forEach((fi,i)=>{const s=F[fi].reverse_survival_ratio;if(s===null)return;const x=labelWidth+(i+.5)*width,y=225-35*s;if(!started){ctx.moveTo(x,y);started=true}else ctx.lineTo(x,y)});ctx.stroke();
+ columns.forEach((fi,i)=>{const s=frames[fi].reverse_survival_ratio;if(s===null)return;const x=labelWidth+(i+.5)*width,y=225-35*s;if(!started){ctx.moveTo(x,y);started=true}else ctx.lineTo(x,y)});ctx.stroke();
 }
 function showEvents(fi){
  const f=F[fi];$('stepEvents').hidden=f.events.length===0;
@@ -574,7 +667,56 @@ function drawWholeBoard(){
   values.forEach((value,i)=>{const td=document.createElement('td');td.textContent=value;if(i>=5)td.title=String([a.model_probability,a.retention_probability,a.next_model_probability,a.delta][i-5]??'Not applicable');if(i===8&&a.delta!==null)td.className=a.delta<0?'danger':'good';row.appendChild(td)});row.onclick=()=>boardCell(c);tbody.appendChild(row);
  });
 }
-function render(){rows=D.cells.filter(a=>($('clues').checked||!a.clue)&&matches(a.cell)).map(a=>a.cell);width=Math.max(4,Math.min(24,Math.floor(24000/columns.length)));$('modeNote').textContent=$('mode').value==='model_probability'?'Color is the model probability of the reference digit in the overview, or the row’s digit in the expanded view. Dark blue = high predicted probability; gray hatching = excluded by the mask.':'Color is the chance that this candidate survives this one transition. Dark blue early is expected for nearly all digits because s is high; it does NOT indicate a selected answer or model confidence. Retention is undefined at initialization and decoding.';drawBoards();drawTimeline();drawOverview();drawExpanded();moveCursors();drawWholeBoard();showEvents(selectedColumn)}
+function chooseRun(index){if(!RUNS[index])return;D={...DATA,...RUNS[index]};F=D.frames;$('seedSelect').value=String(index);$('individualTrajectory').open=true;$('metadata').textContent=JSON.stringify({...D.metadata,selected_seed:D.seed,scores:D.scores},null,2);render();inspect(selectedColumn,selected,selectedDigit)}
+function averageInspectionData(fi,c,d){
+ const f=A.frames[fi],p=f.model_probability?.[c][d]??null,next=A.frames[fi+1]?.model_probability?.[c][d]??null;
+ return {cell:cellName(c),digit:d+1,step:f.step,time_before:f.time,time_after:f.earlier_time,
+  mean_model_probability:p,next_mean_model_probability:next,delta_mean_model_probability:p===null||next===null?null:next-p,
+  mean_retention_probability:f.retention_probability?.[c][d]??null,
+  candidate_frequency_before:f.before_frequency[c][d],candidate_frequency_after:f.after_frequency[c][d],
+  mean_candidate_count_before:f.before_frequency[c].reduce((a,b)=>a+b,0),mean_candidate_count_after:f.mean_candidate_count[c],
+  reference_survival_frequency:f.reference_survival[c],singleton_frequency:f.singleton_frequency[c],
+  final_decoded_frequency:A.prediction_frequency[c][d]};
+}
+function inspectAverage(fi,c,d){$('averageInspection').textContent=JSON.stringify(averageInspectionData(fi,c,d),null,2)}
+function paintAverage(ctx,x,y,c,d,f,compact){
+ const p=f[$('averageMode').value]?.[c][d],available=f.before_frequency[c][d];
+ ctx.fillStyle=p===undefined?'#e2e8f0':available===0?'#ededed':'rgb('+Math.round(255-235*p)+','+Math.round(255-170*p)+','+Math.round(255-58*p)+')';ctx.fillRect(x,y,width,rowHeight);
+ const bold=compact?f.singleton_frequency[c]===1:f.after_frequency[c][d]===1;ctx.strokeStyle=bold?'#172033':'#cbd5e1';ctx.lineWidth=bold?2:.5;ctx.strokeRect(x+1,y+1,width-2,rowHeight-2);
+ if(available===0&&p!==undefined){ctx.strokeStyle='#a1a1aa';ctx.beginPath();for(let i=0;i<width+rowHeight;i+=6){ctx.moveTo(x+Math.max(0,i-rowHeight),y+Math.min(i,rowHeight));ctx.lineTo(x+Math.min(i,width),y+Math.max(0,i-width))}ctx.stroke()}
+ if(compact&&width>=12){ctx.fillStyle=p!==undefined&&p>.65&&available>0?'white':'#172033';ctx.fillText(f.mean_candidate_count[c].toFixed(1),x+2,y+17)}
+}
+function moveAverageCursors(){['averageTimelineCursor','averageOverviewCursor','averageExpandedCursor'].forEach(id=>{$(id).style.left=(labelWidth+averageColumn*width)+'px';$(id).style.width=width+'px'})}
+function drawAverageBoard(){
+ const f=A.frames[averageColumn],state=f[$('averageStage').value||'after_frequency'],root=$('averageBoard'),box=Math.sqrt(side);
+ $('averageSlider').value=averageColumn;$('averageFrameLabel').textContent=columnLabel(f)+' · '+($('averageStage').value==='before_frequency'?'before':'after')+' candidate frequencies';
+ const blanks=DATA.question.flatMap((v,c)=>v<0?[c]:[]);
+ const n=blanks.length,meanCount=n?blanks.reduce((sum,c)=>sum+f.mean_candidate_count[c],0)/n:0,ref=n?blanks.reduce((sum,c)=>sum+f.reference_survival[c],0)/n:1;
+ $('averageFrameSummary').textContent='After column: mean candidates per blank cell '+probabilityText(meanCount)+'; mean reference-cell survival '+probabilityText(ref)+'; reference intact across all blanks in '+probabilityText(f.reference_board_survival)+' of seeds.';
+ root.replaceChildren();root.style.gridTemplateColumns='repeat('+side+',1fr)';root.style.minWidth=(side*90+2*(side-1))+'px';root.style.maxWidth=(side*106+2*(side-1))+'px';
+ state.forEach((frequency,c)=>{
+  const tile=document.createElement('div');tile.className='candidate-cell';if(DATA.question[c]>=0)tile.classList.add('clue');if(c===selected)tile.classList.add('selected');if(frequency[DATA.reference[c]]===0)tile.classList.add('lost');
+  if((c%side+1)%box===0&&c%side<side-1)tile.style.borderRight='3px solid #334155';if((Math.floor(c/side)+1)%box===0&&Math.floor(c/side)<side-1)tile.style.borderBottom='3px solid #334155';
+  const caption=document.createElement('div');caption.className='cell-caption';caption.textContent=cellName(c)+' · mean n='+probabilityText(frequency.reduce((a,b)=>a+b,0));tile.appendChild(caption);
+  const grid=document.createElement('div');grid.className='candidate-digits';grid.style.gridTemplateColumns='repeat('+box+',1fr)';
+  frequency.forEach((value,d)=>{if(value===0)return;const b=document.createElement('button');b.className='candidate-digit';b.textContent=d+1;
+   const small=document.createElement('small');small.style.display='block';small.style.fontSize='9px';small.textContent=Math.round(value*RUNS.length)+'/'+RUNS.length;b.appendChild(small);
+   const p=f[$('averageMode').value]?.[c][d];if(p!==undefined){b.style.background='rgb('+Math.round(255-235*p)+','+Math.round(255-170*p)+','+Math.round(255-58*p)+')';b.style.color=p>.65?'white':'#172033'}
+   if(d===DATA.reference[c])b.classList.add('reference');b.title='Candidate frequency '+value+'; mean probability '+(p??'not applicable');b.onclick=e=>{e.stopPropagation();selectAverageCell(c,d)};grid.appendChild(b)});
+  tile.appendChild(grid);const footer=document.createElement('div');footer.className='cell-caption';footer.textContent='ref '+(DATA.reference[c]+1)+': '+Math.round(frequency[DATA.reference[c]]*RUNS.length)+'/'+RUNS.length;tile.appendChild(footer);tile.onclick=()=>selectAverageCell(c,DATA.reference[c]);root.appendChild(tile);
+ });
+}
+function drawAverage(){
+ if(!A)return;drawTimeline('averageTimeline',A.frames);
+ const cells=DATA.question.flatMap((v,c)=>v<0?[c]:[]),ctx=prepare($('averageOverview'),Math.max(30,cells.length*rowHeight));
+ cells.forEach((c,r)=>{const y=r*rowHeight;ctx.fillStyle='#172033';ctx.fillText(cellName(c)+' ref '+(DATA.reference[c]+1),5,y+17);columns.forEach((fi,i)=>paintAverage(ctx,labelWidth+i*width,y,c,DATA.reference[c],A.frames[fi],true))});
+ const expanded=prepare($('averageExpanded'),side*rowHeight);$('averageExpandedTitle').textContent='Mean candidate probabilities: '+cellName(selected);
+ for(let d=0;d<side;d++){expanded.fillStyle='#172033';expanded.fillText((d===DATA.reference[selected]?'★ ref ':'digit ')+(d+1),5,d*rowHeight+17);columns.forEach((fi,i)=>paintAverage(expanded,labelWidth+i*width,d*rowHeight,selected,d,A.frames[fi],false))}
+ moveAverageCursors();drawAverageBoard();
+}
+function selectAverageTime(fi){if(!A)return;averageColumn=Math.max(0,Math.min(A.frames.length-1,fi));moveAverageCursors();drawAverageBoard();inspectAverage(averageColumn,selected,selectedDigit)}
+function selectAverageCell(c,d){selected=c;selectedDigit=d;$('averagePin').checked=true;render();inspectAverage(averageColumn,c,d)}
+function render(){rows=D.cells.filter(a=>($('clues').checked||!a.clue)&&matches(a.cell)).map(a=>a.cell);width=Math.max(4,Math.min(24,Math.floor(24000/columns.length)));$('modeNote').textContent=$('mode').value==='model_probability'?'Color is the model probability of the reference digit in the overview, or the row’s digit in the expanded view. Dark blue = high predicted probability; gray hatching = excluded by the mask.':'Color is the chance that this candidate survives this one transition. Dark blue early is expected for nearly all digits because s is high; it does NOT indicate a selected answer or model confidence. Retention is undefined at initialization and decoding.';drawBoards();drawTimeline();drawOverview();drawExpanded();moveCursors();drawWholeBoard();showEvents(selectedColumn);drawAverage();if(A)inspectAverage(averageColumn,selected,selectedDigit)}
 function hit(canvas,event){const rect=canvas.getBoundingClientRect(),x=(event.clientX-rect.left)*canvas.width/rect.width,y=(event.clientY-rect.top)*canvas.height/rect.height;return {fi:columns[Math.floor((x-labelWidth)/width)],row:Math.floor(y/rowHeight)}}
 ['overview','expanded'].forEach(id=>{const canvas=$(id);canvas.onmousemove=e=>{if($('pin').checked)return;const h=hit(canvas,e),c=id==='overview'?rows[h.row]:selected,d=id==='overview'?D.reference[c]:h.row;if(h.fi!==undefined&&c!==undefined&&d>=0&&d<side)inspect(h.fi,c,d)};canvas.onclick=e=>{const h=hit(canvas,e);if(h.fi===undefined)return;const c=id==='overview'?rows[h.row]:selected,d=id==='overview'?D.reference[c]:h.row;if(c===undefined||d<0||d>=side)return;selectedColumn=h.fi;selectCell(c,d)}});
 $('timeline').onclick=e=>{const h=hit($('timeline'),e);if(h.fi!==undefined)selectTime(h.fi)};
@@ -583,5 +725,13 @@ $('previousStep').onclick=()=>selectTime(selectedColumn-1);$('nextStep').onclick
 ['mode','clues','filter'].forEach(id=>$(id).addEventListener('change',()=>{render();inspect(selectedColumn,selected,selectedDigit)}));
 ['stage','compareTarget','changedOnly'].forEach(id=>$(id).addEventListener('change',()=>{drawWholeBoard();inspect(selectedColumn,selected,selectedDigit)}));
 let syncing=false;['timelineScroll','overviewScroll','expandedScroll'].forEach(id=>$(id).addEventListener('scroll',()=>{if(syncing)return;syncing=true;['timelineScroll','overviewScroll','expandedScroll'].filter(other=>other!==id).forEach(other=>$(other).scrollLeft=$(id).scrollLeft);syncing=false}));
+$('seedSelect').addEventListener('change',()=>chooseRun(Number($('seedSelect').value)));
+$('averageMode').value='model_probability';$('averageStage').value='after_frequency';
+$('averageMode').addEventListener('change',()=>{drawAverage();inspectAverage(averageColumn,selected,selectedDigit)});
+$('averageStage').addEventListener('change',()=>{if(A)drawAverageBoard()});
+$('averageSlider').oninput=()=>selectAverageTime(Number($('averageSlider').value));
+$('averageTimeline').onclick=e=>{const h=hit($('averageTimeline'),e);if(h.fi!==undefined)selectAverageTime(h.fi)};
+['averageOverview','averageExpanded'].forEach(id=>{const canvas=$(id);const box=e=>{const h=hit(canvas,e),cells=DATA.question.flatMap((v,c)=>v<0?[c]:[]),c=id==='averageOverview'?cells[h.row]:selected,d=id==='averageOverview'?DATA.reference[c]:h.row;return {...h,c,d}};canvas.onmousemove=e=>{if(!A||$('averagePin').checked)return;const h=box(e);if(h.fi!==undefined&&h.c!==undefined&&h.d>=0&&h.d<side)inspectAverage(h.fi,h.c,h.d)};canvas.onclick=e=>{if(!A)return;const h=box(e);if(h.fi===undefined||h.c===undefined||h.d<0||h.d>=side)return;averageColumn=h.fi;selectAverageCell(h.c,h.d)}});
+let averageSyncing=false;['averageTimelineScroll','averageOverviewScroll','averageExpandedScroll'].forEach(id=>$(id).addEventListener('scroll',()=>{if(averageSyncing)return;averageSyncing=true;['averageTimelineScroll','averageOverviewScroll','averageExpandedScroll'].filter(other=>other!==id).forEach(other=>$(other).scrollLeft=$(id).scrollLeft);averageSyncing=false}));
 render();inspect(0,selected,selectedDigit);
 </script></body></html>"""

@@ -88,7 +88,9 @@ def build_report_command(commands):
     )
     sudoku.add_argument("--board-id", type=int, default=0, help="Heatmap: zero-based index in the selected test split")
     sudoku.add_argument("--weights", choices=("ema", "raw"), default="ema", help="Heatmap: checkpoint weights to inspect")
-    sudoku.add_argument("--sampling-seed", type=int, help="Heatmap: sampling seed (defaults to SAMPLE_SEED)")
+    sudoku.add_argument("--sampling-seed", type=int, help="Heatmap: first sampling seed (defaults to SAMPLE_SEED)")
+    sudoku.add_argument("--sampling-seeds", type=positive_int, default=1,
+                        help="Heatmap: number of consecutive seeds to average for the same board")
     sudoku.add_argument("--sampling-steps", type=positive_int, help="Heatmap: sampling budget (defaults to report_steps or sample_steps)")
 
 
