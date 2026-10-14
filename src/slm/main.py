@@ -79,10 +79,11 @@ def build_report_command(commands):
     parser = commands.add_parser("report", help="Evaluate saved weights")
     text8, sudoku = add_tasks(parser)
     for task in (text8, sudoku):
-        task.add_argument("--sampling-seed", type=int,
-                          help="First report seed (defaults to the existing test/sample seeds)")
-        task.add_argument("--sampling-seeds", type=positive_int, default=1,
-                          help="Number of independent consecutive-seed runs to average")
+        seeds = task.add_mutually_exclusive_group()
+        seeds.add_argument("--sampling-seed", type=int,
+                           help="Run once using this seed")
+        seeds.add_argument("--sampling-seeds", type=positive_int,
+                           help="Generate N distinct random seeds and average N runs")
         task.add_argument("--protected-prune-step", action="store_true",
                           help="Use shared protected pruning for Sudoku evaluation and generated samples")
     text8.add_argument("--report", choices=("default",), default="default")

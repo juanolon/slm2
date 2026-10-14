@@ -11,7 +11,7 @@ import torch
 
 from slm.common.checkpoint import CheckpointManager, load_checkpoint
 from slm.common.contracts import Report
-from slm.common.reporting import sampling_settings
+from slm.common.reporting import phase_seeds, sampling_settings
 from slm.common.seeds import SAMPLE_SEED, TEST_SEED, VALIDATION_SEED
 from slm.common.tracking import ExperimentTracker
 from slm.slm.backbone import BFN_DIT
@@ -51,8 +51,8 @@ class DefaultReport(Report):
         from .run import model_config
 
         sampling = sampling_settings(args, TEST_SEED)
-        validation_seeds = sampling_settings(args, VALIDATION_SEED)["sampling_seed_list"]
-        sample_seeds = sampling_settings(args, SAMPLE_SEED)["sampling_seed_list"]
+        validation_seeds = phase_seeds(args, sampling, VALIDATION_SEED)
+        sample_seeds = phase_seeds(args, sampling, SAMPLE_SEED)
         config = model_config(args.config)
         settings = args.config.text8
         run_path = Path(args.run_dir)

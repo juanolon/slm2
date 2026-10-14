@@ -12,7 +12,7 @@ import torch
 
 from slm.common.checkpoint import CheckpointManager, load_checkpoint
 from slm.common.contracts import Report
-from slm.common.reporting import mean_scores, sampling_settings
+from slm.common.reporting import mean_scores, phase_seeds, sampling_settings
 from slm.common.seeds import SAMPLE_SEED, TEST_SEED
 from slm.common.tracking import ExperimentTracker
 from slm.slm.backbone import BFN_DIT
@@ -49,7 +49,7 @@ class DefaultReport(Report):
             for seed in sampling["sampling_seed_list"]
         ]
         scores = mean_scores([run["scores"] for run in by_seed])
-        sample_seeds = sampling_settings(args, SAMPLE_SEED)["sampling_seed_list"]
+        sample_seeds = phase_seeds(args, sampling, SAMPLE_SEED)
         report = {
             "scores": scores,
             "boards": len(test["questions"]),
@@ -130,8 +130,7 @@ class SweepReport(Report):
         run_path = Path(args.run_dir)
         results = evaluate_report(
             model, test, config, torch.device(args.device), budgets=REPORT_STEPS,
-            seed=sampling["sampling_seed"],
-            sampling_seeds=sampling["sampling_seeds"],
+            seeds=sampling["sampling_seed_list"],
             use_protected_prune_step=sampling["protected_prune_step"],
         )
         report = {
@@ -247,18 +246,19 @@ def _start_report(args, config, report, tracking):
 
 
 def evaluate_report(
-    model, split, config, device, budgets=REPORT_STEPS, *, seed=TEST_SEED,
-    sampling_seeds=1, use_protected_prune_step=False,
+    model, split, config, device, budgets=REPORT_STEPS, *, seeds=None,
+    use_protected_prune_step=False,
 ):
-    if type(sampling_seeds) is not int or sampling_seeds < 1:
-        raise ValueError("sampling-seeds must be a positive integer")
+    seeds = [TEST_SEED] if seeds is None else list(seeds)
+    if not seeds:
+        raise ValueError("At least one sampling seed is required")
     runs = [
         _evaluate_report(
-            model, split, config, device, budgets, seed + index,
-            use_protected_prune_step,
+            model, split, config, device, budgets, seed, use_protected_prune_step,
         )
-        for index in range(sampling_seeds)
+        for seed in seeds
     ]
+    sampling_seeds = len(seeds)
     if sampling_seeds == 1:
         return runs[0]
     results = {}
@@ -280,7 +280,7 @@ def evaluate_report(
         results[budget] = {
             "groups": groups,
             "samples": [
-                [seed + index, *sample]
+                [seeds[index], *sample]
                 for index, run in enumerate(runs)
                 for sample in run[budget]["samples"]
             ],
