@@ -10,7 +10,13 @@ import torch
 
 from slm.common.contracts import Report
 from slm.common.seeds import SAMPLE_SEED
-from slm.slm.core import predict_log_probs, repair_empty, reverse_probs, survival_ratio
+from slm.slm.core import (
+    one_hot_tokens,
+    predict_log_probs,
+    repair_empty,
+    reverse_probs,
+    survival_ratio,
+)
 
 from .data import decode_board
 from .evaluation import sudoku_scores
@@ -35,14 +41,41 @@ def _changes(before, after):
     return changes
 
 
-def sample_trajectory(model, question, steps, seed=SAMPLE_SEED):
-    """Record one trajectory with identical RNG draws and rules to solve_sudoku."""
-    if question.ndim != 1 or question.numel() not in (16, 81):
-        raise ValueError("Expected one 4x4 or 9x9 question")
+def prune_step(model, candidate_mask, earlier_time, time, generator=None):
+    """Mirror core.prune_step; additionally return this transition's diagnostics."""
+    with torch.no_grad():
+        # TODO: add temperature to predict_log_probs
+        clean_probabilities = (
+            predict_log_probs(model, candidate_mask, time.float()).double().exp()
+        )
+        probs = reverse_probs(
+            clean_probabilities, candidate_mask, earlier_time.double(), time.double()
+        )
+        uniform_draws = torch.rand(
+            probs.shape, dtype=torch.float64, device=probs.device, generator=generator
+        )
+        sampled = uniform_draws < probs
+        repaired = repair_empty(sampled, probs)
+        changes = _changes(sampled, repaired)
+        return repaired, {
+            "before": candidate_mask[0].cpu().tolist(),
+            "model_probability": clean_probabilities[0].cpu().tolist(),
+            "retention_probability": probs[0].cpu().tolist(),
+            "draws": uniform_draws[0].cpu().tolist(),
+            "sampled": sampled[0].cpu().tolist(),
+            "repaired": repaired[0].cpu().tolist(),
+            "events": [{"kind": "empty_set_repair", "changes": changes}]
+            if changes
+            else [],
+        }
+
+
+def solve_sudoku(model, questions, steps, generator=None, observer=None):
+    """Mirror evaluation.solve_sudoku for one board, returning recorded frames too."""
+    if questions.ndim != 2 or len(questions) != 1 or questions.shape[1] not in (16, 81):
+        raise ValueError("Expected one 4x4 or 9x9 question, with shape (1, cells)")
     if type(steps) is not int or steps < 1:
         raise ValueError("steps must be a positive integer")
-    questions = question[None]
-    generator = torch.Generator(device=question.device).manual_seed(seed)
     old_mode = model.training
     frames = []
     model.eval()
@@ -70,60 +103,44 @@ def sample_trajectory(model, question, steps, seed=SAMPLE_SEED):
                     else [],
                 }
             )
-            for step in range(1, steps + 1):
+            if observer is not None:
+                observer(0, candidates)
+            for index in range(steps, 0, -1):
                 time = torch.full(
-                    (1,),
-                    (steps - step + 1) / steps,
+                    (len(questions),),
+                    index / steps,
                     dtype=torch.float64,
-                    device=question.device,
+                    device=questions.device,
                 )
-                earlier = torch.full_like(time, (steps - step) / steps)
-                # TODO: add temperature to predict_log_probs
-                clean = (
-                    predict_log_probs(model, candidates, time.float()).double().exp()
+                earlier = torch.full_like(time, (index - 1) / steps)
+                candidates, frame = prune_step(
+                    model, candidates, earlier, time, generator
                 )
-                retention = reverse_probs(clean, candidates, earlier, time)
-                draws = torch.rand(
-                    retention.shape,
-                    dtype=torch.float64,
-                    device=question.device,
-                    generator=generator,
+                before_enforcement = candidates
+                candidates = clamp_clues(candidates, questions)
+                changes = _changes(before_enforcement, candidates)
+                if changes:
+                    frame["events"].append(
+                        {"kind": "clue_enforcement", "changes": changes}
+                    )
+                frame.update(
+                    kind="transition",
+                    step=steps - index + 1,
+                    time=time.item(),
+                    earlier_time=earlier.item(),
+                    reverse_survival_ratio=survival_ratio(
+                        earlier, time, candidates.shape[-1]
+                    ).item(),
+                    after=candidates[0].cpu().tolist(),
                 )
-                sampled = draws < retention
-                repaired = repair_empty(sampled, retention)
-                after = clamp_clues(repaired, questions)
-                events = []
-                for kind, before_mask, after_mask in (
-                    ("empty_set_repair", sampled, repaired),
-                    ("clue_enforcement", repaired, after),
-                ):
-                    changes = _changes(before_mask, after_mask)
-                    if changes:
-                        events.append({"kind": kind, "changes": changes})
-                frames.append(
-                    {
-                        "kind": "transition",
-                        "step": step,
-                        "time": time.item(),
-                        "earlier_time": earlier.item(),
-                        "reverse_survival_ratio": survival_ratio(
-                            earlier, time, candidates.shape[-1]
-                        ).item(),
-                        "before": candidates[0].cpu().tolist(),
-                        "model_probability": clean[0].cpu().tolist(),
-                        "retention_probability": retention[0].cpu().tolist(),
-                        "draws": draws[0].cpu().tolist(),
-                        "sampled": sampled[0].cpu().tolist(),
-                        "repaired": repaired[0].cpu().tolist(),
-                        "after": after[0].cpu().tolist(),
-                        "events": events,
-                    }
-                )
-                candidates = after
+                frames.append(frame)
+                if observer is not None:
+                    observer(steps - index + 1, candidates)
             log_probs = predict_log_probs(
-                model, candidates, torch.zeros(1, device=question.device)
+                model, candidates, torch.zeros(len(questions), device=questions.device)
             )
-            predicted = torch.where(questions >= 0, questions, log_probs.argmax(-1))
+            predicted = log_probs.argmax(-1)
+            predicted = torch.where(questions >= 0, questions, predicted)
             final_mask = candidates[0].cpu().tolist()
             frames.append(
                 {
@@ -189,25 +206,34 @@ def analyse_trajectory(trajectory, question, reference):
 
 
 def average_trajectories(runs, question, reference):
-    """Mean probabilities and mask frequencies, never a fabricated discrete path."""
+    """Mean probabilities and mask frequencies"""
     blanks = [c for c, digit in enumerate(question) if digit < 0]
     frames = []
     for index, template in enumerate(runs[0]["frames"]):
         samples = [run["frames"][index] for run in runs]
         frame = {
             key: template[key]
-            for key in ("kind", "step", "time", "earlier_time", "reverse_survival_ratio")
+            for key in (
+                "kind",
+                "step",
+                "time",
+                "earlier_time",
+                "reverse_survival_ratio",
+            )
         }
         for field in ("model_probability", "retention_probability"):
             frame[field] = (
                 torch.tensor([sample[field] for sample in samples], dtype=torch.float64)
-                .mean(0).tolist()
-                if template[field] is not None else None
+                .mean(0)
+                .tolist()
+                if template[field] is not None
+                else None
             )
         for field in ("before", "after"):
             frame[f"{field}_frequency"] = (
                 torch.tensor([sample[field] for sample in samples], dtype=torch.float64)
-                .mean(0).tolist()
+                .mean(0)
+                .tolist()
             )
         frame["mean_candidate_count"] = [sum(mask) for mask in frame["after_frequency"]]
         frame["reference_survival"] = [
@@ -221,9 +247,15 @@ def average_trajectories(runs, question, reference):
             all(sample["after"][c][reference[c]] for c in blanks) for sample in samples
         ) / len(samples)
         frames.append(frame)
-    prediction_frequency = torch.nn.functional.one_hot(
-        torch.tensor([run["prediction"] for run in runs]), len(runs[0]["frames"][0]["after"][0])
-    ).double().mean(0).tolist()
+    prediction_frequency = (
+        one_hot_tokens(
+            torch.tensor([run["prediction"] for run in runs]),
+            len(runs[0]["frames"][0]["after"][0]),
+        )
+        .double()
+        .mean(0)
+        .tolist()
+    )
     return {"frames": frames, "prediction_frequency": prediction_frequency}
 
 
@@ -255,18 +287,24 @@ class HeatmapReport(Report):
         seeds = [seed + index for index in range(seed_count)]
         runs = []
         for sampling_seed in seeds:
-            trajectory = sample_trajectory(model, device_question, steps, sampling_seed)
+            generator = torch.Generator(device=device_question.device).manual_seed(
+                sampling_seed
+            )
+            trajectory = solve_sudoku(model, device_question[None], steps, generator)
             prediction = torch.tensor(trajectory["prediction"], dtype=torch.long)
-            runs.append({
-                "seed": sampling_seed,
-                **trajectory,
-                "cells": analyse_trajectory(trajectory, q, ref),
-                "scores": {
-                    key: value.item() for key, value in sudoku_scores(
-                        prediction[None], question[None], answer[None]
-                    ).items()
-                },
-            })
+            runs.append(
+                {
+                    "seed": sampling_seed,
+                    **trajectory,
+                    "cells": analyse_trajectory(trajectory, q, ref),
+                    "scores": {
+                        key: value.item()
+                        for key, value in sudoku_scores(
+                            prediction[None], question[None], answer[None]
+                        ).items()
+                    },
+                }
+            )
         scores = {
             key: sum(run["scores"][key] for run in runs) / seed_count
             for key in runs[0]["scores"]
@@ -306,7 +344,9 @@ class HeatmapReport(Report):
         else:
             payload.update(runs=runs, average=average_trajectories(runs, q, ref))
         report = {
-            "metadata": metadata, "scores": scores, "html": "trajectory.html",
+            "metadata": metadata,
+            "scores": scores,
+            "html": "trajectory.html",
             "by_seed": [{"seed": run["seed"], "scores": run["scores"]} for run in runs],
         }
         report_path, tracker = _start_report(
@@ -340,13 +380,21 @@ def log_wandb(tracker, completed, data):
     steps = [frame["step"] for frame in runs[0]["frames"]]
     blanks = [i for i, digit in enumerate(data["question"]) if digit < 0]
     survival = [
-        sum(run["frames"][column]["after"][i][data["reference"][i]]
-            for run in runs for i in blanks) / (count * len(blanks)) if blanks else 1.0
+        sum(
+            run["frames"][column]["after"][i][data["reference"][i]]
+            for run in runs
+            for i in blanks
+        )
+        / (count * len(blanks))
+        if blanks
+        else 1.0
         for column in range(len(steps))
     ]
     counts = [
         sum(sum(run["frames"][column]["after"][i]) for run in runs for i in blanks)
-        / (count * len(blanks)) if blanks else 0.0
+        / (count * len(blanks))
+        if blanks
+        else 0.0
         for column in range(len(steps))
     ]
     for name, values in (
@@ -363,7 +411,9 @@ def log_wandb(tracker, completed, data):
                 xname="sampling column (0=initial, N+1=decode)",
             ),
         )
-    transitions = [frame for frame in runs[0]["frames"] if frame["kind"] == "transition"]
+    transitions = [
+        frame for frame in runs[0]["frames"] if frame["kind"] == "transition"
+    ]
     tracker.artifact(
         "heatmap/reverse_survival_ratio",
         wandb.plot.line_series(
@@ -375,7 +425,12 @@ def log_wandb(tracker, completed, data):
         ),
     )
     kinds = sorted(
-        {event["kind"] for run in runs for frame in run["frames"] for event in frame["events"]}
+        {
+            event["kind"]
+            for run in runs
+            for frame in run["frames"]
+            for event in frame["events"]
+        }
     )
     if kinds:
         tracker.artifact(
@@ -386,9 +441,11 @@ def log_wandb(tracker, completed, data):
                     [
                         sum(
                             len(event["changes"])
-                            for run in runs for event in run["frames"][column]["events"]
+                            for run in runs
+                            for event in run["frames"][column]["events"]
                             if event["kind"] == kind
-                        ) / count
+                        )
+                        / count
                         for column in range(len(steps))
                     ]
                     for kind in kinds
@@ -482,16 +539,27 @@ def log_wandb(tracker, completed, data):
         "heatmap/board",
         wandb.Table(
             columns=["seed", "question", "reference", "prediction"],
-            data=[[run["seed"], question, reference,
-                   decode_board(torch.tensor(run["prediction"], dtype=torch.long))] for run in runs],
+            data=[
+                [
+                    run["seed"],
+                    question,
+                    reference,
+                    decode_board(torch.tensor(run["prediction"], dtype=torch.long)),
+                ]
+                for run in runs
+            ],
         ),
     )
     if count > 1:
         keys = list(data["scores"])
         tracker.artifact(
             "heatmap/seed_scores",
-            wandb.Table(columns=["seed", *keys],
-                        data=[[run["seed"], *[run["scores"][key] for key in keys]] for run in runs]),
+            wandb.Table(
+                columns=["seed", *keys],
+                data=[
+                    [run["seed"], *[run["scores"][key] for key in keys]] for run in runs
+                ],
+            ),
         )
 
 
@@ -506,20 +574,21 @@ def write_html(path: Path, data):
 HTML = r"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Sudoku trajectory heatmap</title><style>
-.scroll{position:relative}.time-cursor{position:absolute;top:0;bottom:0;border:2px solid #f59e0b;box-sizing:border-box;pointer-events:none}
-body{font:14px system-ui,sans-serif;margin:20px;color:#172033;background:#f8fafc}h1,h2{margin:12px 0}section{background:white;border:1px solid #d3dbe7;border-radius:6px;padding:14px;margin:14px 0}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f1f5f9;padding:12px}label{display:inline-block;margin:5px 15px 5px 0}select,input{padding:5px}.boards{display:flex;gap:30px;flex-wrap:wrap}.board{display:grid;gap:1px;background:#64748b;border:2px solid #172033}.board button{width:32px;height:32px;border:0;background:#fff;cursor:pointer;font:16px system-ui}.board .clue{font-weight:bold;background:#e2e8f0}.board .incorrect{color:#b91c1c}.board .selected{box-shadow:inset 0 0 0 3px #f59e0b}.scroll{overflow-x:auto;border:1px solid #cbd5e1;margin:8px 0}canvas{display:block}.legend{display:flex;gap:20px;align-items:center;flex-wrap:wrap}.gradient{display:inline-block;width:130px;height:14px;background:linear-gradient(to right,#fff,#1455c5);border:1px solid #888}.masked{background:repeating-linear-gradient(45deg,#eee 0px,#eee 3px,#aaa 3px,#aaa 4px);padding:3px}.hint{color:#475569}
-.metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px}.metric{background:#eff6ff;border:1px solid #bfdbfe;padding:12px;border-radius:5px}.metric strong,.metric span{display:block}.metric span{font-size:17px;margin-top:5px;overflow-wrap:anywhere}.danger{color:#b91c1c}.good{color:#15803d}.candidate-board{display:grid;gap:2px;background:#334155;border:2px solid #334155;max-width:950px;min-width:450px}.candidate-cell{background:#fff;min-height:90px;padding:7px;cursor:pointer}.candidate-cell.clue{background:#e2e8f0}.candidate-cell.peer{background:#f3e8ff}.candidate-cell.selected{box-shadow:inset 0 0 0 3px #f59e0b}.candidate-cell.lost{border-bottom:3px solid #dc2626}.candidate-cell.lost .cell-caption{color:#b91c1c}.candidate-digits{display:grid;gap:2px;min-height:54px;align-content:center}.candidate-digit{border:1px solid #cbd5e1;border-radius:3px;padding:1px;cursor:pointer;font-size:12px}.candidate-digit.reference{border:2px solid #16a34a}.candidate-digit.decoded{outline:2px solid #f59e0b}.candidate-cell.singleton .candidate-digit{font-size:30px}.cell-caption{font-size:11px;margin:3px 0;overflow-wrap:anywhere}.table-scroll{overflow:auto;max-height:480px}table{border-collapse:collapse;width:100%;font-size:12px}th,td{padding:7px;text-align:left;border:1px solid #cbd5e1;white-space:nowrap}th{background:#e2e8f0;position:sticky;top:0}tr.selected{background:#fff0c2}tr.peer{background:#f3e8ff}tbody tr{cursor:pointer}#stepSlider{width:min(650px,70vw)}details{margin-top:10px}#frameSummary{font-weight:bold}
+.scroll{position:relative}.time-cursor{position:absolute;top:0;bottom:20px;border:2px solid #f59e0b;box-sizing:border-box;pointer-events:none}
+body{font:14px system-ui,sans-serif;margin:20px;color:#172033;background:#f8fafc}h1,h2{margin:12px 0}section{background:white;border:1px solid #d3dbe7;border-radius:6px;padding:14px;margin:14px 0}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f1f5f9;padding:12px}label{display:inline-block;margin:5px 15px 5px 0}select,input{padding:5px}.boards{display:flex;gap:30px;flex-wrap:wrap}.board{display:grid;gap:1px;background:#64748b;border:2px solid #172033}.board button{width:32px;height:32px;border:0;background:#fff;cursor:pointer;font:16px system-ui}.board .clue{font-weight:bold;background:#e2e8f0}.board .incorrect{color:#b91c1c}.board .selected{box-shadow:inset 0 0 0 3px #f59e0b}.scroll{overflow-x:auto;border:1px solid #cbd5e1;margin:8px 0;padding-bottom:20px}canvas{display:block}.legend{display:flex;gap:20px;align-items:center;flex-wrap:wrap}.gradient{display:inline-block;width:130px;height:14px;background:linear-gradient(to right,#fff,#1455c5);border:1px solid #888}.masked{background:repeating-linear-gradient(45deg,#eee 0px,#eee 3px,#aaa 3px,#aaa 4px);padding:3px}.hint{color:#475569}
+.metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px}.metric{background:#eff6ff;border:1px solid #bfdbfe;padding:12px;border-radius:5px}.metric strong,.metric span{display:block}.metric span{font-size:17px;margin-top:5px;overflow-wrap:anywhere}.danger{color:#b91c1c}.good{color:#15803d}.candidate-board{display:grid;gap:2px;background:#334155;border:2px solid #334155;max-width:950px;min-width:450px}.candidate-cell{position:relative;background:#fff;min-height:90px;padding:7px;cursor:pointer}.candidate-cell.clue{background:#e2e8f0}.candidate-cell.peer{background:#f3e8ff}.candidate-cell.partial{box-shadow:inset 0 0 0 4px #d97706}.candidate-cell.lost{box-shadow:inset 0 0 0 4px #dc2626}.candidate-cell.selected{box-shadow:inset 0 0 0 4px #2563eb}.candidate-cell.selected.lost{box-shadow:inset 0 0 0 4px #dc2626}.candidate-cell.selected.partial{box-shadow:inset 0 0 0 4px #d97706}.candidate-cell.selected.lost::after,.candidate-cell.selected.partial::after{content:"";position:absolute;inset:0;border:4px dashed #2563eb;pointer-events:none}.candidate-cell.lost .cell-caption{color:#b91c1c}.candidate-digits{display:grid;gap:2px;min-height:54px;align-content:center}.candidate-digit{border:1px solid #cbd5e1;border-radius:3px;padding:1px;cursor:pointer;font-size:12px}.candidate-digit.reference{font-weight:700}.candidate-digit.decoded{outline:3px solid #f59e0b;outline-offset:1px}.candidate-cell.singleton .candidate-digit{font-size:30px}.cell-caption{font-size:11px;margin:3px 0;overflow-wrap:anywhere}.table-scroll{overflow:auto;max-height:480px;padding-bottom:20px}table{border-collapse:collapse;width:100%;font-size:12px}th,td{padding:7px;text-align:left;border:1px solid #cbd5e1;white-space:nowrap}th{background:#e2e8f0;position:sticky;top:0}tr.selected{background:#fff0c2}tr.peer{background:#f3e8ff}tbody tr{cursor:pointer}#stepSlider{width:min(650px,70vw)}details{margin-top:10px}#frameSummary{font-weight:bold}
+.expanded-panel{background:#fff;border:1px solid #d3dbe7;border-radius:6px;padding:14px;margin:14px 0}.panel-heading{display:flex;align-items:center;justify-content:space-between;gap:10px}.sticky-toggle{cursor:pointer;border:1px solid #94a3b8;border-radius:4px;padding:6px 10px;background:#f8fafc;font-size:18px}.sticky-toggle[aria-pressed="true"]{background:#dbeafe;border-color:#2563eb}.expanded-panel.is-sticky{position:sticky;top:8px;z-index:20;max-height:calc(100vh - 16px);overflow-y:auto;box-shadow:0 4px 14px #17203333;border-color:#2563eb}
 </style></head><body>
 <h1>Sudoku sampling trajectory</h1>
-<section id="averageSection" hidden><h2 id="averageTitle">Average across seeds</h2><pre id="averageSummary"></pre><details><summary>Per-seed scores</summary><pre id="averageOutcomes"></pre></details>
-<p>Colors are arithmetic mean probabilities across all seeds, including mask-forced zeros. Counts are mean candidate counts. The candidate board shows digits present in <b>any</b> seed, with exact survival counts underneath (surviving seeds / total seeds). It is not one sampled board. No majority-vote solution is used to calculate scores. A bold overview border means every seed is a singleton; a bold expanded border means that digit survives in every seed.</p>
+<section id="averageSection" hidden><h2 id="averageTitle">Average across seeds</h2><details id="averageInfo"><summary>Info and mean scores</summary><pre id="averageSummary"></pre></details><details><summary>Per-seed scores</summary><pre id="averageOutcomes"></pre></details>
+<p>Colors are arithmetic mean probabilities across all seeds, including mask-forced zeros. Counts are mean candidate counts. The candidate board shows digits present in <b>any</b> seed, with exact survival counts underneath (surviving seeds / total seeds). It is not one sampled board. Cell borders: amber = reference present in some seeds, red = absent, blue = selected. Selected status cells have alternating blue/status-color segments. Bold digits mark the reference; there are no green borders. No majority-vote solution is used to calculate scores. A bold overview border means every seed is a singleton; a bold expanded border means that digit survives in every seed.</p>
 <label>Mean probability <select id="averageMode"><option value="model_probability">Model digit probability</option><option value="retention_probability">Sampler retention probability</option></select></label><label><input id="averagePin" type="checkbox">Pin mean inspector</label>
 <div id="averageTimelineScroll" class="scroll"><canvas id="averageTimeline"></canvas><div id="averageTimelineCursor" class="time-cursor"></div></div>
 <h3>Mean reference-digit probability (blank cells)</h3><div id="averageOverviewScroll" class="scroll"><canvas id="averageOverview"></canvas><div id="averageOverviewCursor" class="time-cursor"></div></div>
-<h3 id="averageExpandedTitle">Mean candidate probabilities</h3><div id="averageExpandedScroll" class="scroll"><canvas id="averageExpanded"></canvas><div id="averageExpandedCursor" class="time-cursor"></div></div><pre id="averageInspection"></pre>
+<div id="averageExpandedPanel" class="expanded-panel"><div class="panel-heading"><h3 id="averageExpandedTitle">Mean candidate probabilities</h3><button id="averageSticky" class="sticky-toggle" type="button" aria-pressed="false" aria-label="Pin mean expanded view" title="Pin expanded view while scrolling">📌</button></div><div id="averageExpandedScroll" class="scroll"><canvas id="averageExpanded"></canvas><div id="averageExpandedCursor" class="time-cursor"></div></div></div><pre id="averageInspection"></pre>
 <h3>Candidate survival frequencies through time</h3><label>Time <input id="averageSlider" type="range" min="0" step="1" value="0"></label><label>Candidate state <select id="averageStage"><option value="after_frequency">After transition</option><option value="before_frequency">Before transition</option></select></label><p id="averageFrameLabel"></p><p id="averageFrameSummary"></p><div class="scroll"><div id="averageBoard" class="candidate-board"></div></div></section>
 <details id="individualTrajectory" open><summary><b>Individual seed trajectory</b> — actual candidates, draws and interventions</summary><label>Seed <select id="seedSelect"></select></label>
-<section><h2>Identity and outcome</h2><pre id="metadata"></pre><div id="boards" class="boards"></div></section>
+<section><details id="info"><summary><b>Info: identity and outcome</b></summary><pre id="metadata"></pre></details><div id="boards" class="boards"></div></section>
 <section><h2>Probability and cell filters</h2>
 <label>Probability <select id="mode"><option value="model_probability">Model digit probability (masked, normalized)</option><option value="retention_probability">Sampler retention probability (Bernoulli inclusion)</option></select></label>
 <label><input id="clues" type="checkbox">Show fixed clues</label>
@@ -530,9 +599,9 @@ body{font:14px system-ui,sans-serif;margin:20px;color:#172033;background:#f8fafc
 </section>
 <section><h2>Timeline: timestep and reverse survival ratio</h2><p>Click a column to freeze the whole-board view at that transition. Each label shows actual step, pre-pruning timestep t, and schedule ratio s. The blue line underneath is s on a fixed 0–1 scale; s is a schedule factor, not the observed surviving-cell fraction. Stars appear only for actual forced changes. No empty intervention lanes are shown.</p><div id="timelineScroll" class="scroll"><canvas id="timeline"></canvas><div id="timelineCursor" class="time-cursor"></div></div><details id="stepEvents"><summary>Actual forced changes at the selected step</summary><div id="eventCells"></div><pre id="eventDetails"></pre></details></section>
 <section><h2>Compact overview: reference-digit probability</h2><p>One row per originally blank cell, in board-position order. Numbers are candidate counts after the column; hover/click for before/after counts and exact probabilities. Hatching marks masked zeros after elimination.</p><div id="overviewScroll" class="scroll"><canvas id="overview"></canvas><div id="overviewCursor" class="time-cursor"></div></div><p id="empty"></p></section>
-<section><h2 id="expandedTitle">Expanded candidate view</h2><p>One row per digit. <b>Bold borders</b> mean the digit survives the transition. The reference row is labeled ★. Click a Sudoku cell, overview row or digit box to link the views.</p><div id="expandedScroll" class="scroll"><canvas id="expanded"></canvas><div id="expandedCursor" class="time-cursor"></div></div></section>
+<section id="expandedPanel" class="expanded-panel"><div class="panel-heading"><h2 id="expandedTitle">Expanded candidate view</h2><button id="expandedSticky" class="sticky-toggle" type="button" aria-pressed="false" aria-label="Pin expanded view" title="Pin expanded view while scrolling">📌</button></div><p>One row per digit. <b>Bold borders</b> mean the digit survives the transition. The reference row is labeled ★. Click a Sudoku cell, overview row or digit box to link the views.</p><div id="expandedScroll" class="scroll"><canvas id="expanded"></canvas><div id="expandedCursor" class="time-cursor"></div></div></section>
 <section><h2>Box inspection</h2><label><input id="pin" type="checkbox">Pin inspection (clicking a box pins it)</label><p class="hint">Hover previews a single box without moving the board's selected time. Click a box to pin it and synchronize the board below. Uncheck Pin to resume hover previews.</p><div id="inspection"></div><details><summary>Intermediate candidate sets and actual interventions</summary><pre id="inspectionDetails"></pre></details></section>
-<section><h2>Whole-board candidates through time</h2><label>Time <input id="stepSlider" type="range" min="0" step="1" value="0"></label><button id="previousStep">Previous</button> <button id="nextStep">Next</button><p id="frameLabel"></p><label>Candidate state <select id="stage"><option value="after">After transition</option><option value="before">Before transition</option></select></label><p id="frameSummary"></p><p>Each cell shows all candidates at the selected state; the sets shrink and singletons become large digits. n = candidate count, −/+ = removed/added counts, ★ = actual forced change. Cell positions stay fixed. Colors still use probabilities <b>before</b> the selected transition. Green digit border = reference; gold = final decoded digit. Purple cells share the selected cell's row, column or box (structural peers, not all attention connections).</p><div class="scroll"><div id="candidateBoard" class="candidate-board"></div></div>
+<section><h2>Whole-board candidates through time</h2><label>Time <input id="stepSlider" type="range" min="0" step="1" value="0"></label><button id="previousStep">Previous</button> <button id="nextStep">Next</button><p id="frameLabel"></p><label>Candidate state <select id="stage"><option value="after">After transition</option><option value="before">Before transition</option></select></label><p id="frameSummary"></p><p>Each cell shows all candidates at the selected state; the sets shrink and singletons become large digits. n = candidate count, −/+ = removed/added counts, ★ = actual forced change. Cell positions stay fixed. Colors still use probabilities <b>before</b> the selected transition. Cell borders: red = reference lost, blue = selected. A selected error cell has alternating red/blue segments. Bold digit = reference; gold = final decoded digit. Purple cells share the selected cell's row, column or box (structural peers, not all attention connections).</p><div class="scroll"><div id="candidateBoard" class="candidate-board"></div></div>
 <h3>Cross-cell comparison at this time</h3><label>Probability target <select id="compareTarget"><option value="reference">Reference digit in each cell</option><option value="selected">Selected digit across all cells</option></select></label><label><input id="changedOnly" type="checkbox">Only changed/intervened cells</label><p id="compareScope"></p><div class="table-scroll"><table><thead><tr><th>Cell</th><th>Target</th><th>Before candidates</th><th>After candidates</th><th>Removed / added</th><th>Model p before</th><th>Retention q</th><th>Model p next call</th><th>Δ model p</th></tr></thead><tbody id="comparisonRows"></tbody></table></div></section>
 </details>
 <script id="trajectory" type="application/json">__TRAJECTORY_DATA__</script>
@@ -615,7 +684,8 @@ function paint(ctx,x,y,c,d,f,compact){const p=f[$('mode').value]?.[c][d];const m
 }
 function moveCursors(){['timelineCursor','overviewCursor','expandedCursor'].forEach(id=>{$(id).style.left=(labelWidth+selectedColumn*width)+'px';$(id).style.width=width+'px'})}
 function drawOverview(){const ctx=prepare($('overview'),Math.max(30,rows.length*rowHeight));rows.forEach((c,r)=>{const y=r*rowHeight;ctx.fillStyle=c===selected?'#fff0c2':'#f1f5f9';ctx.fillRect(0,y,labelWidth,rowHeight);ctx.fillStyle='#172033';ctx.fillText(cellName(c)+' ref '+(D.reference[c]+1)+(D.question[c]>=0?' [clue]':''),5,y+17);columns.forEach((fi,i)=>paint(ctx,labelWidth+i*width,y,c,D.reference[c],F[fi],true));if(c===selected){ctx.strokeStyle='#f59e0b';ctx.lineWidth=2;ctx.strokeRect(1,y+1,$('overview').width-2,rowHeight-2)}});$('empty').textContent=rows.length?'':'No cells match this filter.'}
-function drawExpanded(){const ctx=prepare($('expanded'),side*rowHeight);$('expandedTitle').textContent='Expanded '+cellName(selected)+' — reference digit '+(D.reference[selected]+1);for(let d=0;d<side;d++){const y=d*rowHeight;ctx.fillStyle=d===D.reference[selected]?'#fef3c7':'#f1f5f9';ctx.fillRect(0,y,labelWidth,rowHeight);ctx.fillStyle='#172033';ctx.fillText((d===D.reference[selected]?'★ reference ':'digit ')+(d+1),5,y+17);columns.forEach((fi,i)=>paint(ctx,labelWidth+i*width,y,selected,d,F[fi],false))}}
+function highlightRow(ctx,canvas,y){ctx.strokeStyle='#f59e0b';ctx.lineWidth=3;ctx.strokeRect(1,y+1,canvas.width-2,rowHeight-2)}
+function drawExpanded(){const ctx=prepare($('expanded'),side*rowHeight);$('expandedTitle').textContent='Expanded '+cellName(selected)+' — reference digit '+(D.reference[selected]+1);for(let d=0;d<side;d++){const y=d*rowHeight;ctx.fillStyle=d===selectedDigit?'#fff0c2':d===D.reference[selected]?'#fef3c7':'#f1f5f9';ctx.fillRect(0,y,labelWidth,rowHeight);ctx.fillStyle='#172033';ctx.fillText((d===D.reference[selected]?'★ reference ':'digit ')+(d+1),5,y+17);columns.forEach((fi,i)=>paint(ctx,labelWidth+i*width,y,selected,d,F[fi],false));if(d===selectedDigit)highlightRow(ctx,$('expanded'),y)}}
 function drawTimeline(id='timeline',frames=F){
  const ctx=prepare($(id),240);ctx.fillStyle='#172033';ctx.fillText('reverse survival s',3,212);
  columns.forEach((fi,i)=>{const x=labelWidth+i*width,f=frames[fi];ctx.save();ctx.translate(x+width/2,178);ctx.rotate(-Math.PI/2);ctx.fillText(columnLabel(f),0,0);ctx.restore();if(f.events?.length){ctx.fillStyle='#b45309';ctx.fillText('★',x+1,237);ctx.fillStyle='#172033'}});
@@ -648,7 +718,7 @@ function drawWholeBoard(){
  const root=$('candidateBoard');root.replaceChildren();root.style.gridTemplateColumns='repeat('+side+',1fr)';root.style.minWidth=(side*90+2*(side-1))+'px';root.style.maxWidth=(side*106+2*(side-1))+'px';const box=Math.sqrt(side);
  state.forEach((mask,c)=>{
   const tile=document.createElement('div');tile.className='candidate-cell';
-  if(D.question[c]>=0)tile.classList.add('clue');if(peer(c)&&c!==selected)tile.classList.add('peer');if(c===selected)tile.classList.add('selected');if(!mask[D.reference[c]])tile.classList.add('lost');
+  if(D.question[c]>=0)tile.classList.add('clue');if(peer(c)&&c!==selected)tile.classList.add('peer');if(c===selected)tile.classList.add('selected');tile.classList.add(mask[D.reference[c]]?'reference-alive':'lost');
   if((c%side+1)%box===0&&c%side<side-1)tile.style.borderRight='3px solid #334155';if((Math.floor(c/side)+1)%box===0&&Math.floor(c/side)<side-1)tile.style.borderBottom='3px solid #334155';
   const caption=document.createElement('div');caption.className='cell-caption';caption.textContent=cellName(c)+(D.question[c]>=0?' · clue':' · n='+digits(mask).length);tile.appendChild(caption);
   const grid=document.createElement('div');grid.className='candidate-digits';const remaining=digits(mask);grid.style.gridTemplateColumns='repeat('+Math.max(1,Math.min(box,Math.ceil(Math.sqrt(remaining.length))))+',1fr)';
@@ -695,7 +765,7 @@ function drawAverageBoard(){
  $('averageFrameSummary').textContent='After column: mean candidates per blank cell '+probabilityText(meanCount)+'; mean reference-cell survival '+probabilityText(ref)+'; reference intact across all blanks in '+probabilityText(f.reference_board_survival)+' of seeds.';
  root.replaceChildren();root.style.gridTemplateColumns='repeat('+side+',1fr)';root.style.minWidth=(side*90+2*(side-1))+'px';root.style.maxWidth=(side*106+2*(side-1))+'px';
  state.forEach((frequency,c)=>{
-  const tile=document.createElement('div');tile.className='candidate-cell';if(DATA.question[c]>=0)tile.classList.add('clue');if(c===selected)tile.classList.add('selected');if(frequency[DATA.reference[c]]===0)tile.classList.add('lost');
+  const tile=document.createElement('div');tile.className='candidate-cell';if(DATA.question[c]>=0)tile.classList.add('clue');if(c===selected)tile.classList.add('selected');tile.classList.add(frequency[DATA.reference[c]]===1?'reference-alive':frequency[DATA.reference[c]]===0?'lost':'partial');
   if((c%side+1)%box===0&&c%side<side-1)tile.style.borderRight='3px solid #334155';if((Math.floor(c/side)+1)%box===0&&Math.floor(c/side)<side-1)tile.style.borderBottom='3px solid #334155';
   const caption=document.createElement('div');caption.className='cell-caption';caption.textContent=cellName(c)+' · mean n='+probabilityText(frequency.reduce((a,b)=>a+b,0));tile.appendChild(caption);
   const grid=document.createElement('div');grid.className='candidate-digits';grid.style.gridTemplateColumns='repeat('+box+',1fr)';
@@ -709,9 +779,9 @@ function drawAverageBoard(){
 function drawAverage(){
  if(!A)return;drawTimeline('averageTimeline',A.frames);
  const cells=DATA.question.flatMap((v,c)=>v<0?[c]:[]),ctx=prepare($('averageOverview'),Math.max(30,cells.length*rowHeight));
- cells.forEach((c,r)=>{const y=r*rowHeight;ctx.fillStyle='#172033';ctx.fillText(cellName(c)+' ref '+(DATA.reference[c]+1),5,y+17);columns.forEach((fi,i)=>paintAverage(ctx,labelWidth+i*width,y,c,DATA.reference[c],A.frames[fi],true))});
+ cells.forEach((c,r)=>{const y=r*rowHeight;ctx.fillStyle=c===selected?'#fff0c2':'#f1f5f9';ctx.fillRect(0,y,labelWidth,rowHeight);ctx.fillStyle='#172033';ctx.fillText(cellName(c)+' ref '+(DATA.reference[c]+1),5,y+17);columns.forEach((fi,i)=>paintAverage(ctx,labelWidth+i*width,y,c,DATA.reference[c],A.frames[fi],true));if(c===selected)highlightRow(ctx,$('averageOverview'),y)});
  const expanded=prepare($('averageExpanded'),side*rowHeight);$('averageExpandedTitle').textContent='Mean candidate probabilities: '+cellName(selected);
- for(let d=0;d<side;d++){expanded.fillStyle='#172033';expanded.fillText((d===DATA.reference[selected]?'★ ref ':'digit ')+(d+1),5,d*rowHeight+17);columns.forEach((fi,i)=>paintAverage(expanded,labelWidth+i*width,d*rowHeight,selected,d,A.frames[fi],false))}
+ for(let d=0;d<side;d++){const y=d*rowHeight;expanded.fillStyle=d===selectedDigit?'#fff0c2':d===DATA.reference[selected]?'#fef3c7':'#f1f5f9';expanded.fillRect(0,y,labelWidth,rowHeight);expanded.fillStyle='#172033';expanded.fillText((d===DATA.reference[selected]?'★ ref ':'digit ')+(d+1),5,y+17);columns.forEach((fi,i)=>paintAverage(expanded,labelWidth+i*width,y,selected,d,A.frames[fi],false));if(d===selectedDigit)highlightRow(expanded,$('averageExpanded'),y)}
  moveAverageCursors();drawAverageBoard();
 }
 function selectAverageTime(fi){if(!A)return;averageColumn=Math.max(0,Math.min(A.frames.length-1,fi));moveAverageCursors();drawAverageBoard();inspectAverage(averageColumn,selected,selectedDigit)}
@@ -725,6 +795,9 @@ $('previousStep').onclick=()=>selectTime(selectedColumn-1);$('nextStep').onclick
 ['mode','clues','filter'].forEach(id=>$(id).addEventListener('change',()=>{render();inspect(selectedColumn,selected,selectedDigit)}));
 ['stage','compareTarget','changedOnly'].forEach(id=>$(id).addEventListener('change',()=>{drawWholeBoard();inspect(selectedColumn,selected,selectedDigit)}));
 let syncing=false;['timelineScroll','overviewScroll','expandedScroll'].forEach(id=>$(id).addEventListener('scroll',()=>{if(syncing)return;syncing=true;['timelineScroll','overviewScroll','expandedScroll'].filter(other=>other!==id).forEach(other=>$(other).scrollLeft=$(id).scrollLeft);syncing=false}));
+const stickyPanels=[['expandedPanel','expandedSticky'],['averageExpandedPanel','averageSticky']];
+function toggleSticky(panelId,buttonId){const active=$(buttonId).getAttribute('aria-pressed')!=='true';stickyPanels.forEach(([panel,button])=>{const on=active&&panel===panelId;$(panel).classList.toggle('is-sticky',on);$(button).setAttribute('aria-pressed',String(on));$(button).setAttribute('aria-label',on?'Unpin expanded view':'Pin expanded view');$(button).title=on?'Unpin expanded view':'Pin expanded view while scrolling'})}
+stickyPanels.forEach(([panel,button])=>$(button).onclick=()=>toggleSticky(panel,button));
 $('seedSelect').addEventListener('change',()=>chooseRun(Number($('seedSelect').value)));
 $('averageMode').value='model_probability';$('averageStage').value='after_frequency';
 $('averageMode').addEventListener('change',()=>{drawAverage();inspectAverage(averageColumn,selected,selectedDigit)});
