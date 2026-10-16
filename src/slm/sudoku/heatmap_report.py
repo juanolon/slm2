@@ -18,7 +18,7 @@ from slm.slm.core import (
     reverse_probs,
     survival_ratio,
 )
-from slm.slm.sampling import protected_prune_step, confidence_gated_prune_step
+from slm.slm.sampling import protected_prune_step, confidence_gated_prune_step, topk_prune_step
 
 from .data import decode_board
 from .evaluation import sudoku_scores
@@ -53,14 +53,14 @@ def prune_step(model, candidate_mask, earlier_time, time, generator=None):
 
 def solve_sudoku(
     model, questions, steps, generator=None, use_protected_prune_step=False,
-    *, use_confidence_gated_prune_step=False,
+    *, use_confidence_gated_prune_step=False, use_topk_prune_step=False,
 ):
     """Mirror evaluation.solve_sudoku for one board, returning recorded frames too."""
     if questions.ndim != 2 or len(questions) != 1 or questions.shape[1] not in (16, 81):
         raise ValueError("Expected one 4x4 or 9x9 question, with shape (1, cells)")
     if type(steps) is not int or steps < 1:
         raise ValueError("steps must be a positive integer")
-    if use_protected_prune_step and use_confidence_gated_prune_step:
+    if sum((use_protected_prune_step, use_confidence_gated_prune_step, use_topk_prune_step)) > 1:
         raise ValueError("Pruning modes are mutually exclusive")
     old_mode = model.training
     frames = []
@@ -94,8 +94,9 @@ def solve_sudoku(
                 )
                 earlier = torch.full_like(time, (index - 1) / steps)
 
-                if use_protected_prune_step or use_confidence_gated_prune_step:
-                    pruning = (confidence_gated_prune_step if use_confidence_gated_prune_step
+                if use_protected_prune_step or use_confidence_gated_prune_step or use_topk_prune_step:
+                    pruning = (topk_prune_step if use_topk_prune_step else
+                               confidence_gated_prune_step if use_confidence_gated_prune_step
                                else protected_prune_step)
                     candidates, frame = pruning(
                         model, candidates, earlier, time, generator, record=True
@@ -252,6 +253,7 @@ class HeatmapReport(Report):
             trajectory = solve_sudoku(
                 model, device_question[None], steps, generator, use_protected_prune_step,
                 use_confidence_gated_prune_step=sampling["confidence_gated_prune_step"],
+                use_topk_prune_step=sampling["topk_prune_step"],
             )
             prediction = torch.tensor(trajectory["prediction"], dtype=torch.long)
             runs.append(
@@ -370,7 +372,7 @@ $('metadata').textContent=JSON.stringify({...D.metadata,selected_seed:D.seed,sco
 $('stepSlider').max=F.length-1;
 $('averageSection').hidden=!A;$('individualTrajectory').open=!A;
 RUNS.forEach((run,index)=>{const option=document.createElement('option');option.value=index;option.textContent='Seed '+run.seed;$('seedSelect').appendChild(option)});$('seedSelect').value='0';
-if(A){$('averageSlider').max=A.frames.length-1;$('averageTitle').textContent='Average across '+RUNS.length+' seeds';$('averageSummary').textContent=JSON.stringify({board_id:DATA.metadata.board_id,board_key:DATA.metadata.board_key,seeds:DATA.metadata.sampling_seed_list,sampling_steps:DATA.metadata.sampling_steps,protected_prune_step:DATA.metadata.protected_prune_step,confidence_gated_prune_step:DATA.metadata.confidence_gated_prune_step,mean_scores:DATA.scores},null,2);$('averageOutcomes').textContent=JSON.stringify(RUNS.map(run=>({seed:run.seed,scores:run.scores})),null,2)}
+if(A){$('averageSlider').max=A.frames.length-1;$('averageTitle').textContent='Average across '+RUNS.length+' seeds';$('averageSummary').textContent=JSON.stringify({board_id:DATA.metadata.board_id,board_key:DATA.metadata.board_key,seeds:DATA.metadata.sampling_seed_list,sampling_steps:DATA.metadata.sampling_steps,protected_prune_step:DATA.metadata.protected_prune_step,confidence_gated_prune_step:DATA.metadata.confidence_gated_prune_step,topk_prune_step:DATA.metadata.topk_prune_step,mean_scores:DATA.scores},null,2);$('averageOutcomes').textContent=JSON.stringify(RUNS.map(run=>({seed:run.seed,scores:run.scores})),null,2)}
 function matches(c){const a=D.cells[c], f=$('filter').value;return f==='all'||f==='lost'&&a.first_loss!==null||f==='wrong'&&a.wrong_singleton||f==='multiple'&&a.multiple_until_decode}
 function columnLabel(f){return f.kind==='initial'?'initial t=1 s=—':f.kind==='decode'?'decode t=0 s=—':'step '+f.step+' t='+f.time.toFixed(4)+' s='+f.reverse_survival_ratio.toFixed(4)}
 function mechanisms(f,c,d){
@@ -380,8 +382,9 @@ function mechanisms(f,c,d){
  if(!f.before[c][d])result.push('Unavailable before pruning: ordinary candidate masking forces probability to zero');
  else result.push(f.sampled[c][d]?'Retained by Bernoulli sampling':'Removed by Bernoulli sampling');
  if(f.cell_selected){
-  result.push(f.cell_selected[c]?(f.cell_selection_forced[c]?'Cell update forced (no cells selected)':'Cell selected by confidence gate'):'Cell not selected: input mask retained; Bernoulli proposal ignored');
-  if(f.cell_selected[c]&&f.protected_digit_index[c]===d)result.push('Kept by protected-digit enforcement');
+  result.push(f.cell_selected[c]?(f.top_k?'Cell selected by top-k confidence':f.cell_selection_forced?.[c]?'Cell update forced (no cells selected)':'Cell selected by confidence gate'):'Cell not selected: input mask retained; Bernoulli proposal ignored');
+  if(f.cell_selected[c]&&f.protected_digit_index?.[c]===d)result.push('Kept by protected-digit enforcement');
+  else if(f.cell_selected[c]&&f.sampled[c][d]!==f.repaired[c][d])result.push('Changed by empty-set repair');
  }else if(f.sampled[c][d]!==f.repaired[c][d])result.push(DATA.metadata.protected_prune_step?'Kept by protected-digit enforcement':'Changed by empty-set repair');
  if(f.repaired[c][d]!==f.after[c][d])result.push('Changed by clue enforcement');
  return result;
@@ -552,7 +555,7 @@ function drawAverage(){
 }
 function selectAverageTime(fi){if(!A)return;averageColumn=Math.max(0,Math.min(A.frames.length-1,fi));moveAverageCursors();drawAverageBoard();inspectAverage(averageColumn,selected,selectedDigit)}
 function selectAverageCell(c,d){selected=c;selectedDigit=d;$('averagePin').checked=true;render();inspectAverage(averageColumn,c,d)}
-function render(){rows=D.cells.filter(a=>($('clues').checked||!a.clue)&&matches(a.cell)).map(a=>a.cell);$('modeNote').textContent=$('mode').value==='model_probability'?'Color is the model probability of the reference digit in the overview, or the row’s digit in the expanded view. Dark blue = high predicted probability; gray hatching = excluded by the mask.':'Color is the chance that this candidate survives this one transition. Dark blue early is expected for nearly all digits because s is high; it does NOT indicate a selected answer or model confidence. Retention is undefined at initialization and decoding.';if(DATA.metadata.confidence_gated_prune_step)$('modeNote').textContent+=' Confidence-gated mode only updates selected cells (probability = confidence², with a fallback selection); q is the Bernoulli proposal, not the final survival probability. Inspect a cell for gate draws and protection.';if(DATA.metadata.protected_prune_step)$('modeNote').textContent+=' Protected mode additionally guarantees a model-sampled digit survives; q describes the Bernoulli pruning before that enforcement.';drawBoards();drawTimeline();drawOverview();drawExpanded();moveCursors();drawWholeBoard();drawAverage();if(A)inspectAverage(averageColumn,selected,selectedDigit)}
+function render(){rows=D.cells.filter(a=>($('clues').checked||!a.clue)&&matches(a.cell)).map(a=>a.cell);$('modeNote').textContent=$('mode').value==='model_probability'?'Color is the model probability of the reference digit in the overview, or the row’s digit in the expanded view. Dark blue = high predicted probability; gray hatching = excluded by the mask.':'Color is the chance that this candidate survives this one transition. Dark blue early is expected for nearly all digits because s is high; it does NOT indicate a selected answer or model confidence. Retention is undefined at initialization and decoding.';if(DATA.metadata.confidence_gated_prune_step)$('modeNote').textContent+=' Confidence-gated mode only updates selected cells (probability = confidence², with a fallback selection); q is the Bernoulli proposal, not the final survival probability. Inspect a cell for gate draws and protection.';if(DATA.metadata.topk_prune_step)$('modeNote').textContent+=' Top-k mode updates only the five most confident unresolved cells, using q = p + (1-p) × 0.5 with empty-set repair. Other cells retain their input masks; their Bernoulli proposals are ignored.';if(DATA.metadata.protected_prune_step)$('modeNote').textContent+=' Protected mode additionally guarantees a model-sampled digit survives; q describes the Bernoulli pruning before that enforcement.';drawBoards();drawTimeline();drawOverview();drawExpanded();moveCursors();drawWholeBoard();drawAverage();if(A)inspectAverage(averageColumn,selected,selectedDigit)}
 function hit(canvas,event){const rect=canvas.getBoundingClientRect(),x=(event.clientX-rect.left)*canvas.width/rect.width,y=(event.clientY-rect.top)*canvas.height/rect.height;return {fi:columns[Math.floor((x-labelWidth)/width)],row:Math.floor(y/rowHeight)}}
 ['overview','expanded'].forEach(id=>{const canvas=$(id);canvas.onmousemove=e=>{if($('pin').checked)return;const h=hit(canvas,e),c=id==='overview'?rows[h.row]:selected,d=id==='overview'?D.reference[c]:h.row;if(h.fi!==undefined&&c!==undefined&&d>=0&&d<side)inspect(h.fi,c,d)};canvas.onclick=e=>{const h=hit(canvas,e);if(h.fi===undefined)return;const c=id==='overview'?rows[h.row]:selected,d=id==='overview'?D.reference[c]:h.row;if(c===undefined||d<0||d>=side)return;selectedColumn=h.fi;selectCell(c,d)}});
 $('timeline').onclick=e=>{const h=hit($('timeline'),e);if(h.fi!==undefined)selectTime(h.fi)};

@@ -14,7 +14,7 @@ from slm.slm.core import (
     sample_steps,
 )
 
-from slm.slm.sampling import protected_prune_step, confidence_gated_prune_step
+from slm.slm.sampling import protected_prune_step, confidence_gated_prune_step, topk_prune_step
 
 from .data import gather_windows
 
@@ -100,11 +100,13 @@ class Text8Evaluator:
 def generate(
     model, batch, length, vocabulary_size, steps, device="cpu", return_history=False,
     *, use_protected_prune_step=False, use_confidence_gated_prune_step=False,
+    use_topk_prune_step=False,
 ):
     assert steps >= 1
-    if use_protected_prune_step and use_confidence_gated_prune_step:
+    if sum((use_protected_prune_step, use_confidence_gated_prune_step, use_topk_prune_step)) > 1:
         raise ValueError("Pruning modes are mutually exclusive")
-    pruning = (confidence_gated_prune_step if use_confidence_gated_prune_step else
+    pruning = (topk_prune_step if use_topk_prune_step else
+               confidence_gated_prune_step if use_confidence_gated_prune_step else
                protected_prune_step if use_protected_prune_step else prune_step)
     old = model.training
     model.eval()

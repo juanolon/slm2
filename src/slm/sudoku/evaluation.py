@@ -4,7 +4,7 @@ import torch
 
 from slm.common.seeds import VALIDATION_SEED
 from slm.slm.core import predict_log_probs, prune_step
-from slm.slm.sampling import protected_prune_step, confidence_gated_prune_step
+from slm.slm.sampling import protected_prune_step, confidence_gated_prune_step, topk_prune_step
 
 from .data import valid_units
 from .task import blank_mean, clamp_clues, initial_candidates
@@ -12,13 +12,15 @@ from .task import blank_mean, clamp_clues, initial_candidates
 
 def solve_sudoku(
     model, questions, steps, generator=None, observer=None, *,
-    use_protected_prune_step=False, use_confidence_gated_prune_step=False
+    use_protected_prune_step=False, use_confidence_gated_prune_step=False,
+    use_topk_prune_step=False,
 ):
     if steps < 1:
         raise ValueError("steps must be positive")
-    if use_protected_prune_step and use_confidence_gated_prune_step:
+    if sum((use_protected_prune_step, use_confidence_gated_prune_step, use_topk_prune_step)) > 1:
         raise ValueError("Pruning modes are mutually exclusive")
-    pruning = (confidence_gated_prune_step if use_confidence_gated_prune_step else
+    pruning = (topk_prune_step if use_topk_prune_step else
+               confidence_gated_prune_step if use_confidence_gated_prune_step else
                protected_prune_step if use_protected_prune_step else prune_step)
     old_mode = model.training
     model.eval()
@@ -92,6 +94,7 @@ def evaluate_sudoku(model, split, config, device, limit=None, seed=VALIDATION_SE
             model, questions, config.sample_steps, generator,
             use_protected_prune_step=getattr(config, "protected_prune_step", False),
             use_confidence_gated_prune_step=getattr(config, "confidence_gated_prune_step", False),
+            use_topk_prune_step=getattr(config, "topk_prune_step", False),
         )
         for key, values in sudoku_scores(predictions, questions, answers).items():
             totals[key] = totals.get(key, 0.0) + values.sum().item()

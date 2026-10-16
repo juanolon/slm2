@@ -87,6 +87,8 @@ def build_report_command(commands):
         pruning = task.add_mutually_exclusive_group()
         pruning.add_argument("--protected-prune-step", action="store_true",
                              help="Use protected pruning for Sudoku evaluation and generated samples")
+        pruning.add_argument("--topk-prune-step", action="store_true",
+                             help="Prune the top five most confident unresolved cells")
         pruning.add_argument("--confidence-gated-prune-step", action="store_true",
                              help="Apply protected pruning only to confidence-selected cells")
     text8.add_argument("--report", choices=("default",), default="default")

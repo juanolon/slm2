@@ -131,6 +131,7 @@ class SweepReport(Report):
             use_protected_prune_step=sampling["protected_prune_step"],
             **({"use_confidence_gated_prune_step": True}
                if sampling["confidence_gated_prune_step"] else {}),
+            **({"use_topk_prune_step": True} if sampling["topk_prune_step"] else {}),
         )
         report = {
             "by_steps": results,
@@ -247,6 +248,7 @@ def _start_report(args, config, report, tracking):
 def evaluate_report(
     model, split, config, device, budgets=REPORT_STEPS, *, seeds=None,
     use_protected_prune_step=False, use_confidence_gated_prune_step=False,
+    use_topk_prune_step=False,
 ):
     seeds = [TEST_SEED] if seeds is None else list(seeds)
     if not seeds:
@@ -254,7 +256,7 @@ def evaluate_report(
     runs = [
         _evaluate_report(
             model, split, config, device, budgets, seed, use_protected_prune_step,
-            use_confidence_gated_prune_step,
+            use_confidence_gated_prune_step, use_topk_prune_step,
         )
         for seed in seeds
     ]
@@ -290,7 +292,7 @@ def evaluate_report(
 
 def _evaluate_report(
     model, split, config, device, budgets, seed, use_protected_prune_step,
-    use_confidence_gated_prune_step=False,
+    use_confidence_gated_prune_step=False, use_topk_prune_step=False,
 ):
     count = len(split["questions"])
     if count < 1:
@@ -337,6 +339,7 @@ def _evaluate_report(
                 **pruning_options({
                     "protected_prune_step": use_protected_prune_step,
                     "confidence_gated_prune_step": use_confidence_gated_prune_step,
+                    "topk_prune_step": use_topk_prune_step,
                 }),
             )
             scores = {

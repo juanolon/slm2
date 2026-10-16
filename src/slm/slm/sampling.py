@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import math
-
 import torch
 
 from slm.slm.core import repair_empty
@@ -71,7 +69,6 @@ def confidence_gated_prune_step(
     select cells containing candidates with high probability
     still, protect highest probability candidate from being prune
     continue with pruning on the selected cells
-
     """
     if record and len(candidate_mask) != 1:
         raise ValueError("Recorded pruning requires a single board")
@@ -99,7 +96,6 @@ def confidence_gated_prune_step(
             generator=generator,
         )
         selected_cells = selection_draws < cell_selection_probability
-
 
         # If an unfinished board selected no cells, select its most
         # confident unresolved cell. This guarantees an update attempt.
@@ -164,4 +160,116 @@ def confidence_gated_prune_step(
             "cell_selection_draw": selection_draws[0].cpu().tolist(),
             "cell_selected": selected_cells[0].cpu().tolist(),
             "cell_selection_forced": (forced_selection[0].cpu().tolist()),
+        }
+
+
+def topk_prune_step(
+    model,
+    candidate_mask,
+    earlier_time,
+    time,
+    generator=None,
+    *,
+    confidence_power=2.0,
+    top_k=5,
+    protect_digit=False,
+    record=False,
+):
+    """
+    Prune the top-k most confident unresolved cells using retention
+    p + (1 - p) * 0.5; leave all other cells unchanged.
+    """
+    if record and len(candidate_mask) != 1:
+        raise ValueError("Recorded pruning requires a single board")
+    if confidence_power <= 0:
+        raise ValueError("confidence_power must be positive")
+
+    with torch.no_grad():
+        clean_probabilities = (
+            predict_log_probs(model, candidate_mask, time.float()).double().exp()
+        )
+        clean_probabilities = clean_probabilities.masked_fill(~candidate_mask, 0.0)
+
+        # choose cells containing more that one candidate
+        unresolved_cells = candidate_mask.sum(dim=-1) > 1
+        cell_confidence = clean_probabilities.max(dim=-1).values
+
+        cell_selection_probability = cell_confidence.pow(confidence_power).masked_fill(
+            ~unresolved_cells, -torch.inf
+        )
+
+        if type(top_k) is not int or top_k < 1:
+            raise ValueError("top_k must be a positive integer")
+        k = min(top_k, candidate_mask.shape[-2])
+        top_indices = cell_selection_probability.topk(k, dim=-1).indices
+
+        selected_cells = torch.zeros_like(unresolved_cells)
+        selected_cells.scatter_(-1, top_indices, True)
+
+        selected_cells = selected_cells & unresolved_cells
+
+        if protect_digit:
+            # protect high probability candidate
+            protected_digit = torch.multinomial(
+                clean_probabilities.reshape(-1, clean_probabilities.shape[-1]),
+                num_samples=1,
+                generator=generator,
+            ).reshape(*clean_probabilities.shape[:-1], 1)
+
+        # reverse transition probabilities
+        probs = reverse_probs(
+            clean_probabilities,
+            candidate_mask,
+            earlier_time.double(),
+            time.double(),
+        )
+
+        baseline_retention = 0.5
+        stronger_probs = (
+            clean_probabilities + (1.0 - clean_probabilities) * baseline_retention
+        ).masked_fill(~candidate_mask, 0.0)
+
+        probs = torch.where(
+            selected_cells.unsqueeze(-1),
+            stronger_probs,
+            probs,
+        )
+
+        uniform_draws = torch.rand(
+            probs.shape,
+            dtype=torch.float64,
+            device=probs.device,
+            generator=generator,
+        )
+        orig_reverse_candidates = (uniform_draws < probs) & candidate_mask
+
+        if protect_digit:
+            proposed = orig_reverse_candidates & candidate_mask
+            proposed.scatter_(-1, protected_digit, True)
+        else:
+            proposed = repair_empty(orig_reverse_candidates, probs)
+
+        # apply new candidates to selected cells
+        survivors = torch.where(
+            selected_cells.unsqueeze(-1),
+            proposed,
+            candidate_mask,
+        )
+
+        if not record:
+            return survivors
+
+        return survivors, {
+            "before": candidate_mask[0].cpu().tolist(),
+            "model_probability": clean_probabilities[0].cpu().tolist(),
+            "retention_probability": probs[0].cpu().tolist(),
+            "draws": uniform_draws[0].cpu().tolist(),
+            "sampled": orig_reverse_candidates[0].cpu().tolist(),
+            "repaired": survivors[0].cpu().tolist(),
+            **({"protected_digit_index": protected_digit[0].squeeze(-1).cpu().tolist()}
+               if protect_digit else {}),
+            "cell_confidence": cell_confidence[0].cpu().tolist(),
+            "cell_selected": selected_cells[0].cpu().tolist(),
+            "top_k": top_k,
+            "baseline_retention": baseline_retention,
         }
