@@ -18,8 +18,7 @@ from slm.slm.core import (
     reverse_probs,
     survival_ratio,
 )
-
-from slm.slm.sampling import protected_prune_step
+from slm.slm.sampling import protected_prune_step, confidence_gated_prune_step
 
 from .data import decode_board
 from .evaluation import sudoku_scores
@@ -52,12 +51,17 @@ def prune_step(model, candidate_mask, earlier_time, time, generator=None):
         }
 
 
-def solve_sudoku(model, questions, steps, generator=None, use_protected_prune_step=False):
+def solve_sudoku(
+    model, questions, steps, generator=None, use_protected_prune_step=False,
+    *, use_confidence_gated_prune_step=False,
+):
     """Mirror evaluation.solve_sudoku for one board, returning recorded frames too."""
     if questions.ndim != 2 or len(questions) != 1 or questions.shape[1] not in (16, 81):
         raise ValueError("Expected one 4x4 or 9x9 question, with shape (1, cells)")
     if type(steps) is not int or steps < 1:
         raise ValueError("steps must be a positive integer")
+    if use_protected_prune_step and use_confidence_gated_prune_step:
+        raise ValueError("Pruning modes are mutually exclusive")
     old_mode = model.training
     frames = []
     model.eval()
@@ -90,8 +94,10 @@ def solve_sudoku(model, questions, steps, generator=None, use_protected_prune_st
                 )
                 earlier = torch.full_like(time, (index - 1) / steps)
 
-                if use_protected_prune_step:
-                    candidates, frame = protected_prune_step(
+                if use_protected_prune_step or use_confidence_gated_prune_step:
+                    pruning = (confidence_gated_prune_step if use_confidence_gated_prune_step
+                               else protected_prune_step)
+                    candidates, frame = pruning(
                         model, candidates, earlier, time, generator, record=True
                     )
                 else:
@@ -244,7 +250,8 @@ class HeatmapReport(Report):
                 sampling_seed
             )
             trajectory = solve_sudoku(
-                model, device_question[None], steps, generator, use_protected_prune_step
+                model, device_question[None], steps, generator, use_protected_prune_step,
+                use_confidence_gated_prune_step=sampling["confidence_gated_prune_step"],
             )
             prediction = torch.tensor(trajectory["prediction"], dtype=torch.long)
             runs.append(
@@ -340,7 +347,7 @@ body{font:14px system-ui,sans-serif;margin:20px;color:#172033;background:#f8fafc
 <label><input id="clues" type="checkbox">Show fixed clues</label>
 <label>Cells <select id="filter"><option value="all">All</option><option value="lost">Lost reference digit</option><option value="wrong">Incorrect singleton</option><option value="multiple">Multiple candidates until decoding</option></select></label>
 <p><b>Timing:</b> color = probability <b>before</b> pruning; borders/counts = candidates <b>after</b> sampling, repair/protection and clue enforcement. Initial state is separate; final decoding chooses a digit without changing the candidate set.</p>
-<div class="legend"><span>0 <span class="gradient"></span> 1 (fixed probability scale)</span><span class="masked">Already eliminated: zero forced by mask</span><span style="color:#dc2626">▲ first reference loss</span><span>▣ singleton / surviving digit border</span><span>— probability not applicable</span><span>✓ final selected digit; compact ✓/× = reference match/mismatch</span></div>
+<div class="legend"><span>0 <span class="gradient"></span> 1 (fixed probability scale)</span><span class="masked">Already eliminated: zero forced by mask</span><span style="color:#dc2626">▲ first reference loss</span><span>▣ singleton / surviving digit border</span><span style="color:#9333ea">━ compact: cell selected for update (including forced selection)</span><span>— probability not applicable</span><span>✓ final selected digit; compact ✓/× = reference match/mismatch</span></div>
 <p id="modeNote" class="hint"></p>
 </section>
 <section><h2>Timeline: timestep and reverse survival ratio</h2><p>Click a column to freeze the whole-board view at that transition. Each label shows actual step, pre-pruning timestep t, and schedule ratio s. The blue line underneath is s on a fixed 0–1 scale; s is a schedule factor, not the observed surviving-cell fraction.</p><div id="timelineScroll" class="scroll"><canvas id="timeline"></canvas><div id="timelineCursor" class="time-cursor"></div></div></section>
@@ -363,7 +370,7 @@ $('metadata').textContent=JSON.stringify({...D.metadata,selected_seed:D.seed,sco
 $('stepSlider').max=F.length-1;
 $('averageSection').hidden=!A;$('individualTrajectory').open=!A;
 RUNS.forEach((run,index)=>{const option=document.createElement('option');option.value=index;option.textContent='Seed '+run.seed;$('seedSelect').appendChild(option)});$('seedSelect').value='0';
-if(A){$('averageSlider').max=A.frames.length-1;$('averageTitle').textContent='Average across '+RUNS.length+' seeds';$('averageSummary').textContent=JSON.stringify({board_id:DATA.metadata.board_id,board_key:DATA.metadata.board_key,seeds:DATA.metadata.sampling_seed_list,sampling_steps:DATA.metadata.sampling_steps,protected_prune_step:DATA.metadata.protected_prune_step,mean_scores:DATA.scores},null,2);$('averageOutcomes').textContent=JSON.stringify(RUNS.map(run=>({seed:run.seed,scores:run.scores})),null,2)}
+if(A){$('averageSlider').max=A.frames.length-1;$('averageTitle').textContent='Average across '+RUNS.length+' seeds';$('averageSummary').textContent=JSON.stringify({board_id:DATA.metadata.board_id,board_key:DATA.metadata.board_key,seeds:DATA.metadata.sampling_seed_list,sampling_steps:DATA.metadata.sampling_steps,protected_prune_step:DATA.metadata.protected_prune_step,confidence_gated_prune_step:DATA.metadata.confidence_gated_prune_step,mean_scores:DATA.scores},null,2);$('averageOutcomes').textContent=JSON.stringify(RUNS.map(run=>({seed:run.seed,scores:run.scores})),null,2)}
 function matches(c){const a=D.cells[c], f=$('filter').value;return f==='all'||f==='lost'&&a.first_loss!==null||f==='wrong'&&a.wrong_singleton||f==='multiple'&&a.multiple_until_decode}
 function columnLabel(f){return f.kind==='initial'?'initial t=1 s=—':f.kind==='decode'?'decode t=0 s=—':'step '+f.step+' t='+f.time.toFixed(4)+' s='+f.reverse_survival_ratio.toFixed(4)}
 function mechanisms(f,c,d){
@@ -372,7 +379,10 @@ function mechanisms(f,c,d){
  const result=[];
  if(!f.before[c][d])result.push('Unavailable before pruning: ordinary candidate masking forces probability to zero');
  else result.push(f.sampled[c][d]?'Retained by Bernoulli sampling':'Removed by Bernoulli sampling');
- if(f.sampled[c][d]!==f.repaired[c][d])result.push(DATA.metadata.protected_prune_step?'Kept by protected-digit enforcement':'Changed by empty-set repair');
+ if(f.cell_selected){
+  result.push(f.cell_selected[c]?(f.cell_selection_forced[c]?'Cell update forced (no cells selected)':'Cell selected by confidence gate'):'Cell not selected: input mask retained; Bernoulli proposal ignored');
+  if(f.cell_selected[c]&&f.protected_digit_index[c]===d)result.push('Kept by protected-digit enforcement');
+ }else if(f.sampled[c][d]!==f.repaired[c][d])result.push(DATA.metadata.protected_prune_step?'Kept by protected-digit enforcement':'Changed by empty-set repair');
  if(f.repaired[c][d]!==f.after[c][d])result.push('Changed by clue enforcement');
  return result;
 }
@@ -384,6 +394,12 @@ function inspectionData(fi,c,d){
   sampler_retention_probability:f.retention_probability?.[c][d]??null,
   uniform_draw:f.draws?.[c][d]??null,candidate_before:f.before[c][d],candidate_after:f.after[c][d],
   candidates_before:digits(f.before[c]),candidates_after:digits(f.after[c]),
+  cell_confidence:f.cell_confidence?.[c]??null,
+  cell_selection_probability:f.cell_selection_probability?.[c]??null,
+  cell_selection_draw:f.cell_selection_draw?.[c]??null,
+  cell_selected:f.cell_selected?.[c]??null,
+  cell_selection_forced:f.cell_selection_forced?.[c]??null,
+  protected_digit:f.protected_digit_index?f.protected_digit_index[c]+1:null,
   change_mechanism:mechanisms(f,c,d),final_digit:D.prediction[c]+1};
 }
 function metric(root,label,value){
@@ -399,6 +415,13 @@ function inspect(fi,c,d){
  metric(cards,'Model digit probability p',info.model_digit_probability);
  metric(cards,'Sampler retention probability q',info.sampler_retention_probability);
  metric(cards,'Uniform draw u (kept if u < q)',info.uniform_draw);
+ if(f.cell_selected){
+  metric(cards,'Cell confidence (max p)',info.cell_confidence);
+  metric(cards,'Cell selection probability (confidence²)',info.cell_selection_probability);
+  metric(cards,'Cell selection draw',info.cell_selection_draw);
+  metric(cards,'Cell selected / forced',info.cell_selected+' / '+info.cell_selection_forced);
+  metric(cards,'Protected digit',info.protected_digit);
+ }
  metric(cards,'Candidate status',(info.candidate_before?'Available':'Excluded')+' → '+(info.candidate_after?'available':'excluded'));
  root.appendChild(cards);
  const sets=document.createElement('p');sets.textContent='Candidates ('+info.candidates_before.length+' → '+info.candidates_after.length+'): ['+info.candidates_before.join(', ')+'] → ['+info.candidates_after.join(', ')+']';root.appendChild(sets);
@@ -407,7 +430,11 @@ function inspect(fi,c,d){
  refState.textContent=f.after[c][D.reference[c]]?'Reference digit still available.':'Reference digit lost; first elimination at step '+D.cells[c].first_loss+'.';root.appendChild(refState);
  $('inspectionDetails').textContent=JSON.stringify({time_before:info.time_before,time_after:info.time_after,
   reverse_survival_ratio:info.reverse_survival_ratio,after_sampling:digits(f.sampled[c]),
-  after_repair_or_protection:digits(f.repaired[c]),final_digit:info.final_digit},null,2);
+  after_repair_or_protection:digits(f.repaired[c]),
+  cell_confidence:info.cell_confidence,cell_selection_probability:info.cell_selection_probability,
+  cell_selection_draw:info.cell_selection_draw,cell_selected:info.cell_selected,
+  cell_selection_forced:info.cell_selection_forced,protected_digit:info.protected_digit,
+  final_digit:info.final_digit},null,2);
 }
 function selectCell(c,d=D.reference[c]){selected=c;selectedDigit=d;if(D.question[c]>=0)$('clues').checked=true;if(!matches(c))$('filter').value='all';$('pin').checked=true;render();inspect(selectedColumn,c,d)}
 function boardCell(c){selectCell(c,$('compareTarget').value==='selected'?selectedDigit:D.reference[c])}
@@ -424,6 +451,7 @@ function paint(ctx,x,y,c,d,f,compact){const p=f[$('mode').value]?.[c][d];const m
  const survives=compact?digits(f.after[c]).length===1:f.after[c][d];ctx.strokeStyle=survives?'#172033':'#cbd5e1';ctx.lineWidth=survives?2:0.5;ctx.strokeRect(x+1,y+1,width-2,rowHeight-2);
  if(compact&&width>=12){ctx.fillStyle=masked||p===undefined||p<0.65?'#172033':'white';ctx.fillText(digits(f.after[c]).length,x+width/2-3,y+17)}else if((p===undefined||p===null)&&width>=12){ctx.fillStyle='#64748b';ctx.fillText('—',x+3,y+17)}
  if(f.kind==='decode'&&width>=12&&(compact||D.prediction[c]===d)){ctx.fillStyle='#172033';ctx.fillText(D.prediction[c]===d?'✓':'×',x+2,y+22)}
+ if(compact&&f.cell_selected?.[c]){ctx.fillStyle='#9333ea';ctx.fillRect(x+1,y+rowHeight-5,width-2,3)}
  markReferenceLoss(ctx,x,y,c,f,d,compact);
 }
 function moveCursors(){['timelineCursor','overviewCursor','expandedCursor'].forEach(id=>{$(id).style.left=(labelWidth+selectedColumn*width)+'px';$(id).style.width=width+'px'})}
@@ -524,7 +552,7 @@ function drawAverage(){
 }
 function selectAverageTime(fi){if(!A)return;averageColumn=Math.max(0,Math.min(A.frames.length-1,fi));moveAverageCursors();drawAverageBoard();inspectAverage(averageColumn,selected,selectedDigit)}
 function selectAverageCell(c,d){selected=c;selectedDigit=d;$('averagePin').checked=true;render();inspectAverage(averageColumn,c,d)}
-function render(){rows=D.cells.filter(a=>($('clues').checked||!a.clue)&&matches(a.cell)).map(a=>a.cell);$('modeNote').textContent=$('mode').value==='model_probability'?'Color is the model probability of the reference digit in the overview, or the row’s digit in the expanded view. Dark blue = high predicted probability; gray hatching = excluded by the mask.':'Color is the chance that this candidate survives this one transition. Dark blue early is expected for nearly all digits because s is high; it does NOT indicate a selected answer or model confidence. Retention is undefined at initialization and decoding.';if(DATA.metadata.protected_prune_step)$('modeNote').textContent+=' Protected mode additionally guarantees a model-sampled digit survives; q describes the Bernoulli pruning before that enforcement.';drawBoards();drawTimeline();drawOverview();drawExpanded();moveCursors();drawWholeBoard();drawAverage();if(A)inspectAverage(averageColumn,selected,selectedDigit)}
+function render(){rows=D.cells.filter(a=>($('clues').checked||!a.clue)&&matches(a.cell)).map(a=>a.cell);$('modeNote').textContent=$('mode').value==='model_probability'?'Color is the model probability of the reference digit in the overview, or the row’s digit in the expanded view. Dark blue = high predicted probability; gray hatching = excluded by the mask.':'Color is the chance that this candidate survives this one transition. Dark blue early is expected for nearly all digits because s is high; it does NOT indicate a selected answer or model confidence. Retention is undefined at initialization and decoding.';if(DATA.metadata.confidence_gated_prune_step)$('modeNote').textContent+=' Confidence-gated mode only updates selected cells (probability = confidence², with a fallback selection); q is the Bernoulli proposal, not the final survival probability. Inspect a cell for gate draws and protection.';if(DATA.metadata.protected_prune_step)$('modeNote').textContent+=' Protected mode additionally guarantees a model-sampled digit survives; q describes the Bernoulli pruning before that enforcement.';drawBoards();drawTimeline();drawOverview();drawExpanded();moveCursors();drawWholeBoard();drawAverage();if(A)inspectAverage(averageColumn,selected,selectedDigit)}
 function hit(canvas,event){const rect=canvas.getBoundingClientRect(),x=(event.clientX-rect.left)*canvas.width/rect.width,y=(event.clientY-rect.top)*canvas.height/rect.height;return {fi:columns[Math.floor((x-labelWidth)/width)],row:Math.floor(y/rowHeight)}}
 ['overview','expanded'].forEach(id=>{const canvas=$(id);canvas.onmousemove=e=>{if($('pin').checked)return;const h=hit(canvas,e),c=id==='overview'?rows[h.row]:selected,d=id==='overview'?D.reference[c]:h.row;if(h.fi!==undefined&&c!==undefined&&d>=0&&d<side)inspect(h.fi,c,d)};canvas.onclick=e=>{const h=hit(canvas,e);if(h.fi===undefined)return;const c=id==='overview'?rows[h.row]:selected,d=id==='overview'?D.reference[c]:h.row;if(c===undefined||d<0||d>=side)return;selectedColumn=h.fi;selectCell(c,d)}});
 $('timeline').onclick=e=>{const h=hit($('timeline'),e);if(h.fi!==undefined)selectTime(h.fi)};

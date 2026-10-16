@@ -10,6 +10,9 @@ def generate_seeds(count):
 
 
 def sampling_settings(args, default_seed):
+    if (getattr(args, "protected_prune_step", False)
+            and getattr(args, "confidence_gated_prune_step", False)):
+        raise ValueError("Pruning modes are mutually exclusive")
     count = getattr(args, "sampling_seeds", None)
     seed = getattr(args, "sampling_seed", None)
     if count is not None:
@@ -25,6 +28,16 @@ def sampling_settings(args, default_seed):
         "sampling_seeds": len(seeds),
         "sampling_seed_list": seeds,
         "protected_prune_step": getattr(args, "protected_prune_step", False),
+        "confidence_gated_prune_step": getattr(args, "confidence_gated_prune_step", False),
+    }
+
+
+def pruning_options(sampling):
+    """Only pass enabled options, preserving default solver call signatures."""
+    return {
+        f"use_{name}": True
+        for name in ("protected_prune_step", "confidence_gated_prune_step")
+        if sampling.get(name, False)
     }
 
 

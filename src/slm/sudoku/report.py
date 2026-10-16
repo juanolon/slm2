@@ -12,7 +12,7 @@ import torch
 
 from slm.common.checkpoint import CheckpointManager, load_checkpoint
 from slm.common.contracts import Report
-from slm.common.reporting import mean_scores, phase_seeds, sampling_settings
+from slm.common.reporting import mean_scores, phase_seeds, sampling_settings, pruning_options
 from slm.common.seeds import SAMPLE_SEED, TEST_SEED
 from slm.common.tracking import ExperimentTracker
 from slm.slm.backbone import BFN_DIT
@@ -77,15 +77,12 @@ class DefaultReport(Report):
             count = min(4, config.microbatch, len(test["questions"]))
             questions = test["questions"][:count].to(device)
             samples = []
-            pruning_options = (
-                {"use_protected_prune_step": True}
-                if sampling["protected_prune_step"] else {}
-            )
+            options = pruning_options(sampling)
             for seed in sample_seeds:
                 predictions = solve_sudoku(
                     model, questions, steps,
                     torch.Generator(device=device).manual_seed(seed),
-                    **pruning_options,
+                    **options,
                 )
                 for question, prediction, answer in zip(
                     questions, predictions, test["answers"][:count]
@@ -132,6 +129,8 @@ class SweepReport(Report):
             model, test, config, torch.device(args.device), budgets=REPORT_STEPS,
             seeds=sampling["sampling_seed_list"],
             use_protected_prune_step=sampling["protected_prune_step"],
+            **({"use_confidence_gated_prune_step": True}
+               if sampling["confidence_gated_prune_step"] else {}),
         )
         report = {
             "by_steps": results,
@@ -247,7 +246,7 @@ def _start_report(args, config, report, tracking):
 
 def evaluate_report(
     model, split, config, device, budgets=REPORT_STEPS, *, seeds=None,
-    use_protected_prune_step=False,
+    use_protected_prune_step=False, use_confidence_gated_prune_step=False,
 ):
     seeds = [TEST_SEED] if seeds is None else list(seeds)
     if not seeds:
@@ -255,6 +254,7 @@ def evaluate_report(
     runs = [
         _evaluate_report(
             model, split, config, device, budgets, seed, use_protected_prune_step,
+            use_confidence_gated_prune_step,
         )
         for seed in seeds
     ]
@@ -289,7 +289,8 @@ def evaluate_report(
 
 
 def _evaluate_report(
-    model, split, config, device, budgets, seed, use_protected_prune_step
+    model, split, config, device, budgets, seed, use_protected_prune_step,
+    use_confidence_gated_prune_step=False,
 ):
     count = len(split["questions"])
     if count < 1:
@@ -333,7 +334,10 @@ def _evaluate_report(
 
             predictions = solve_sudoku(
                 model, questions, steps, generator, observer=observe,
-                **({"use_protected_prune_step": True} if use_protected_prune_step else {}),
+                **pruning_options({
+                    "protected_prune_step": use_protected_prune_step,
+                    "confidence_gated_prune_step": use_confidence_gated_prune_step,
+                }),
             )
             scores = {
                 key: values.cpu()

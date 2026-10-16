@@ -84,8 +84,11 @@ def build_report_command(commands):
                            help="Run once using this seed")
         seeds.add_argument("--sampling-seeds", type=positive_int,
                            help="Generate N distinct random seeds and average N runs")
-        task.add_argument("--protected-prune-step", action="store_true",
-                          help="Use shared protected pruning for Sudoku evaluation and generated samples")
+        pruning = task.add_mutually_exclusive_group()
+        pruning.add_argument("--protected-prune-step", action="store_true",
+                             help="Use protected pruning for Sudoku evaluation and generated samples")
+        pruning.add_argument("--confidence-gated-prune-step", action="store_true",
+                             help="Apply protected pruning only to confidence-selected cells")
     text8.add_argument("--report", choices=("default",), default="default")
     sudoku.add_argument(
         "--report", choices=("default", "sweep", "heatmap"), default="default",

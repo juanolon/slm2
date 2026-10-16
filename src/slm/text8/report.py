@@ -11,7 +11,7 @@ import torch
 
 from slm.common.checkpoint import CheckpointManager, load_checkpoint
 from slm.common.contracts import Report
-from slm.common.reporting import phase_seeds, sampling_settings
+from slm.common.reporting import phase_seeds, sampling_settings, pruning_options
 from slm.common.seeds import SAMPLE_SEED, TEST_SEED, VALIDATION_SEED
 from slm.common.tracking import ExperimentTracker
 from slm.slm.backbone import BFN_DIT
@@ -128,7 +128,7 @@ class DefaultReport(Report):
                 tokens = generate(
                     model, 4, config.length, config.vocab,
                     steps=SAMPLE_NFE - 1, device=device,
-                    **({"use_protected_prune_step": True} if sampling["protected_prune_step"] else {}),
+                    **pruning_options(sampling),
                 )
                 for row in tokens.cpu().tolist():
                     text = "".join(ALPHABET[token] for token in row)
