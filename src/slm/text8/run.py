@@ -101,6 +101,7 @@ class Runner(TaskRunner):
             wandb_mode=args.wandb_mode,
             entity=args.entity,
             project=args.project,
+            run_config=args.config,
         ).run()
 
     def report(self, args: Namespace) -> dict[str, Any]:

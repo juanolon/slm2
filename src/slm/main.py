@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import json
 import math
 from pathlib import Path
+from types import SimpleNamespace
 
 from slm.common.config import load_config
 from slm.common.contracts import TaskRunner
@@ -75,6 +77,7 @@ def build_train_command(commands):
     text8, sudoku = add_tasks(parser)
     add_training_arguments(text8)
     add_training_arguments(sudoku)
+    return {"text8": text8, "sudoku": sudoku}
 
 
 def build_report_command(commands):
@@ -121,6 +124,7 @@ def build_report_command(commands):
         type=positive_int,
         help="Default/heatmap sampling budget (defaults to report_steps or sample_steps)",
     )
+    return {"text8": text8, "sudoku": sudoku}
 
 
 def build_smoke_command(commands):
@@ -133,8 +137,10 @@ def build_smoke_command(commands):
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="SLM training")
     commands = parser.add_subparsers(dest="command", required=True)
-    build_train_command(commands)
-    build_report_command(commands)
+    task_parsers = {
+        "train": build_train_command(commands),
+        "report": build_report_command(commands),
+    }
     build_smoke_command(commands)
 
     args = parser.parse_args(argv)
@@ -147,11 +153,55 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(f"{args.task} is not implemented yet")
     runner: TaskRunner = module.Runner()
     try:
-        args.config = (
-            DEFAULT_CONFIG
-            if args.command == "smoke"
-            else load_config(args.experiment, args.task)
-        )
+        if args.command == "smoke":
+            args.config = DEFAULT_CONFIG
+        else:
+            yaml_config = load_config(args.experiment, args.task)
+            task_parsers[args.command][args.task].set_defaults(
+                **{**vars(yaml_config), **vars(yaml_config)[args.task]}
+            )
+            args = parser.parse_args(argv)
+            args.name = args.name or Path(args.experiment).stem
+            if args.task == "sudoku":
+                small = args.dataset == "sudoku4x4"
+                args.vocab, args.length = (4, 16) if small else (9, 81)
+            if args.command == "report":
+                from slm.common.reporting import phase_seeds, sampling_settings
+                from slm.common.seeds import SAMPLE_SEED, TEST_SEED, VALIDATION_SEED
+
+                manifest = Path(args.run_dir) / "manifest.json"
+                tracking = (
+                    json.loads(manifest.read_text()).get("wandb", {})
+                    if manifest.exists()
+                    else {}
+                )
+                args.project = (
+                    f"{args.project or tracking.get('project') or args.task}-report"
+                )
+                args.entity = args.entity or tracking.get("entity")
+                default_seed = SAMPLE_SEED if args.report == "heatmap" else TEST_SEED
+                sampling = sampling_settings(args, default_seed)
+                args.sample_seed_list = phase_seeds(args, sampling, SAMPLE_SEED)
+                args.validation_seed_list = phase_seeds(args, sampling, VALIDATION_SEED)
+                args.sampling_explicit = (
+                    args.sampling_seed is not None or args.sampling_seeds is not None
+                )
+                vars(args).update(sampling)
+                if args.task == "sudoku" and args.report != "sweep":
+                    if args.sampling_steps is None:
+                        args.sampling_steps = getattr(
+                            args, "report_steps", args.sample_steps
+                        )
+                if args.task == "sudoku" and args.report == "sweep":
+                    from slm.sudoku.report import REPORT_STEPS
+
+                    args.sampling_budgets = list(REPORT_STEPS)
+            args.config = SimpleNamespace(
+                **{
+                    key: str(value) if isinstance(value, Path) else value
+                    for key, value in vars(args).items()
+                }
+            )
         runner.validate_config(args.config)
         match args.command:
             case "train":

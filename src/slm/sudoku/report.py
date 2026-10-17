@@ -39,7 +39,7 @@ class DefaultReport(Report):
             args
         )
         evaluation_config = SimpleNamespace(
-            **{**vars(config), "sample_steps": steps, **sampling}
+            **{**vars(config), "sample_steps": steps, "sampling_steps": steps, **sampling}
         )
         device = torch.device(args.device)
         by_seed = [
@@ -240,10 +240,10 @@ def _start_report(args, config, report, tracking):
     (report_path / "sudoku_report.json").write_text(json.dumps(report, indent=2))
     tracker = ExperimentTracker(
         report_path,
-        config,
+        vars(args.config),
         name=args.name or tracking.get("name") or config["objective"],
         mode=args.wandb_mode or tracking["mode"],
-        project=f"{args.project or tracking['project']}-report",
+        project=getattr(args.config, "project", None) or f"{args.project or tracking['project']}-report",
         entity=args.entity if args.entity is not None else tracking.get("entity"),
         resume=False,
     )

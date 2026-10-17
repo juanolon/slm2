@@ -137,6 +137,7 @@ class Runner(TaskRunner):
             entity=args.entity,
             project=args.project,
             data_metadata=metadata,
+            run_config=args.config,
         ).run()
 
     def report(self, args: Namespace) -> dict[str, Any]:

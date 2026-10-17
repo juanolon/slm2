@@ -46,9 +46,7 @@ def validate_config(config: SimpleNamespace) -> None:
         if type(value) is not int or value < 1:
             raise ValueError(f"{key} must be a positive integer")
     if config.global_batch % config.microbatch:
-        raise ValueError(
-                "Global batch size must be divisible by microbatch size"
-        )
+        raise ValueError("Global batch size must be divisible by microbatch size")
     if config.objective not in ("weighted", "simple"):
         raise ValueError("objective must be weighted or simple")
     if type(config.amp) is not bool:

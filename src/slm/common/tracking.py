@@ -17,6 +17,9 @@ class NullTracker:
     def artifact(self, name, value):
         pass
 
+    def html(self, name, path):
+        pass
+
     def finish(self, exit_code=0):
         pass
 
@@ -103,6 +106,15 @@ class ExperimentTracker:
     def artifact(self, name: str, value: Any) -> None:
         """Log a preconstructed chart/table; experiments supply scientific content."""
         self.run.log({name: value})
+
+    def html(self, name: str, path: str | Path) -> None:
+        """Publish an HTML preview and keep the original downloadable in Files."""
+        import wandb
+
+        path = Path(path).resolve()
+        self.run.save(str(path), base_path=str(path.parent), policy="now")
+        with path.open(encoding="utf-8") as handle:
+            self.run.log({name: wandb.Html(handle, inject=False)})
 
     def finish(self, exit_code: int = 0) -> None:
         if not self.closed:

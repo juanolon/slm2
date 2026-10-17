@@ -267,14 +267,15 @@ class HeatmapReport(Report):
         report = {
             "metadata": metadata,
             "scores": scores,
-            "html": "trajectory.html",
+            "html": "heatmap_report.html",
         }
         report_path, tracker = _start_report(
             args, {**vars(config), "sample_steps": steps, **metadata}, report, tracking
         )
-        html_path = report_path / "trajectory.html"
+        html_path = report_path / "heatmap_report.html"
         try:
             write_html(html_path, payload)
+            tracker.html("report/heatmap/html", html_path)
             tracker.log(
                 completed,
                 {f"report/heatmap/{key}": value for key, value in scores.items()},

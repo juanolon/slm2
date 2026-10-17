@@ -114,10 +114,10 @@ class DefaultReport(Report):
         (report_path / "final_report.json").write_text(json.dumps(report, indent=2))
         tracker = ExperimentTracker(
             report_path,
-            {**vars(config), **sampling},
+            vars(args.config),
             name=args.name or tracking.get("name") or config.objective,
             mode=args.wandb_mode or tracking["mode"],
-            project=f"{args.project or tracking['project']}-report",
+            project=getattr(args.config, "project", None) or f"{args.project or tracking['project']}-report",
             entity=args.entity if args.entity is not None else tracking.get("entity"),
             resume=False,
         )

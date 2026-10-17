@@ -11,7 +11,11 @@ def generate_seeds(count):
 
 
 def sampling_settings(args, default_seed):
-    sampler = getattr(args, "sampler", "default")
+    if hasattr(args, "sampling_seed_list"):
+        return {key: getattr(args, key) for key in (
+            "sampling_seed", "sampling_seeds", "sampling_seed_list", "sampler", "sampler_note"
+        )}
+    sampler = getattr(args, "sampler", None) or "default"
     pruning = get_sampler(sampler)
     count = getattr(args, "sampling_seeds", None)
     seed = getattr(args, "sampling_seed", None)
@@ -33,6 +37,8 @@ def sampling_settings(args, default_seed):
 
 
 def phase_seeds(args, sampling, default_seed):
+    if getattr(args, "sampling_explicit", None) is False:
+        return [default_seed]
     if (
         getattr(args, "sampling_seed", None) is not None
         or getattr(args, "sampling_seeds", None) is not None

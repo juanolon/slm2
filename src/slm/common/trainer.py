@@ -174,6 +174,7 @@ class Trainer:
         tracker_factory=ExperimentTracker,
         selected_sizes=None,
         data_metadata=None,
+        run_config=None,
     ):
         device = torch.device(device)
         self.task, self.source = task, source
@@ -194,7 +195,7 @@ class Trainer:
             # Tracker startup randomness is discarded by fresh seeding or RNG restore.
             tracker = tracker_factory(
                 run_path,
-                vars(config),
+                vars(run_config if run_config is not None else config),
                 name=name or config.objective,
                 mode=wandb_mode,
                 project=project,
