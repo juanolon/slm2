@@ -12,7 +12,7 @@ import torch
 
 from slm.common.checkpoint import CheckpointManager, load_checkpoint
 from slm.common.contracts import Report
-from slm.common.reporting import mean_scores, phase_seeds, sampling_settings, pruning_options
+from slm.common.reporting import mean_scores, phase_seeds, sampling_settings
 from slm.common.seeds import SAMPLE_SEED, TEST_SEED
 from slm.common.tracking import ExperimentTracker
 from slm.slm.backbone import BFN_DIT
@@ -43,9 +43,12 @@ class DefaultReport(Report):
         )
         device = torch.device(args.device)
         by_seed = [
-            {"seed": seed, "scores": evaluate_sudoku(
-                model, test, evaluation_config, device, seed=seed
-            )}
+            {
+                "seed": seed,
+                "scores": evaluate_sudoku(
+                    model, test, evaluation_config, device, seed=seed
+                ),
+            }
             for seed in sampling["sampling_seed_list"]
         ]
         scores = mean_scores([run["scores"] for run in by_seed])
@@ -77,12 +80,13 @@ class DefaultReport(Report):
             count = min(4, config.microbatch, len(test["questions"]))
             questions = test["questions"][:count].to(device)
             samples = []
-            options = pruning_options(sampling)
             for seed in sample_seeds:
                 predictions = solve_sudoku(
-                    model, questions, steps,
+                    model,
+                    questions,
+                    steps,
                     torch.Generator(device=device).manual_seed(seed),
-                    **options,
+                    sampler=sampling["sampler"],
                 )
                 for question, prediction, answer in zip(
                     questions, predictions, test["answers"][:count]
@@ -126,12 +130,13 @@ class SweepReport(Report):
         )
         run_path = Path(args.run_dir)
         results = evaluate_report(
-            model, test, config, torch.device(args.device), budgets=REPORT_STEPS,
+            model,
+            test,
+            config,
+            torch.device(args.device),
+            budgets=REPORT_STEPS,
             seeds=sampling["sampling_seed_list"],
-            use_protected_prune_step=sampling["protected_prune_step"],
-            **({"use_confidence_gated_prune_step": True}
-               if sampling["confidence_gated_prune_step"] else {}),
-            **({"use_topk_prune_step": True} if sampling["topk_prune_step"] else {}),
+            sampler=sampling["sampler"],
         )
         report = {
             "by_steps": results,
@@ -246,17 +251,27 @@ def _start_report(args, config, report, tracking):
 
 
 def evaluate_report(
-    model, split, config, device, budgets=REPORT_STEPS, *, seeds=None,
-    use_protected_prune_step=False, use_confidence_gated_prune_step=False,
-    use_topk_prune_step=False,
+    model,
+    split,
+    config,
+    device,
+    budgets=REPORT_STEPS,
+    *,
+    seeds=None,
+    sampler="default",
 ):
     seeds = [TEST_SEED] if seeds is None else list(seeds)
     if not seeds:
         raise ValueError("At least one sampling seed is required")
     runs = [
         _evaluate_report(
-            model, split, config, device, budgets, seed, use_protected_prune_step,
-            use_confidence_gated_prune_step, use_topk_prune_step,
+            model,
+            split,
+            config,
+            device,
+            budgets,
+            seed,
+            sampler=sampler,
         )
         for seed in seeds
     ]
@@ -272,8 +287,11 @@ def evaluate_report(
                 "boards": group["boards"],
                 "scores": mean_scores([peer["scores"] for peer in peers]),
                 "trajectory": {
-                    key: values if key == "step" else [
-                        sum(peer["trajectory"][key][i] for peer in peers) / sampling_seeds
+                    key: values
+                    if key == "step"
+                    else [
+                        sum(peer["trajectory"][key][i] for peer in peers)
+                        / sampling_seeds
                         for i in range(len(values))
                     ]
                     for key, values in group["trajectory"].items()
@@ -291,8 +309,14 @@ def evaluate_report(
 
 
 def _evaluate_report(
-    model, split, config, device, budgets, seed, use_protected_prune_step,
-    use_confidence_gated_prune_step=False, use_topk_prune_step=False,
+    model,
+    split,
+    config,
+    device,
+    budgets,
+    seed,
+    *,
+    sampler="default",
 ):
     count = len(split["questions"])
     if count < 1:
@@ -335,12 +359,12 @@ def _evaluate_report(
                 for_boards[index] = survives.all(-1)
 
             predictions = solve_sudoku(
-                model, questions, steps, generator, observer=observe,
-                **pruning_options({
-                    "protected_prune_step": use_protected_prune_step,
-                    "confidence_gated_prune_step": use_confidence_gated_prune_step,
-                    "topk_prune_step": use_topk_prune_step,
-                }),
+                model,
+                questions,
+                steps,
+                generator,
+                observer=observe,
+                sampler=sampler,
             )
             scores = {
                 key: values.cpu()
@@ -472,7 +496,11 @@ def log_report(tracker, completed, results):
         tracker.artifact(
             f"samples/sudoku-{steps}",
             wandb.Table(
-                columns=(["seed"] if result["samples"] and len(result["samples"][0]) == 5 else [])
+                columns=(
+                    ["seed"]
+                    if result["samples"] and len(result["samples"][0]) == 5
+                    else []
+                )
                 + ["question", "prediction", "reference", "rating"],
                 data=result["samples"],
             ),

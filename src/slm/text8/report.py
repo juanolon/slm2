@@ -11,7 +11,7 @@ import torch
 
 from slm.common.checkpoint import CheckpointManager, load_checkpoint
 from slm.common.contracts import Report
-from slm.common.reporting import phase_seeds, sampling_settings, pruning_options
+from slm.common.reporting import phase_seeds, sampling_settings
 from slm.common.seeds import SAMPLE_SEED, TEST_SEED, VALIDATION_SEED
 from slm.common.tracking import ExperimentTracker
 from slm.slm.backbone import BFN_DIT
@@ -33,7 +33,8 @@ def average_evaluations(results):
         "bpc": mean,
         # Independent repeats include both window selection and MC randomness.
         "mc_se": math.sqrt(
-            sum((result["bpc"] - mean) ** 2 for result in results) / (count * (count - 1))
+            sum((result["bpc"] - mean) ** 2 for result in results)
+            / (count * (count - 1))
         ),
     }
     if "window_seed" in combined:
@@ -72,15 +73,25 @@ class DefaultReport(Report):
                 "seed": seed,
                 "validation_seed": validation_seed,
                 "validation": evaluate_stream(
-                    model, valid, config, windows or len(valid) // config.length,
-                    draws, seed=validation_seed,
+                    model,
+                    valid,
+                    config,
+                    windows or len(valid) // config.length,
+                    draws,
+                    seed=validation_seed,
                 ),
                 "test": evaluate_stream(
-                    model, test, config, windows or len(test) // config.length,
-                    draws, seed=seed,
+                    model,
+                    test,
+                    config,
+                    windows or len(test) // config.length,
+                    draws,
+                    seed=seed,
                 ),
             }
-            for seed, validation_seed in zip(sampling["sampling_seed_list"], validation_seeds)
+            for seed, validation_seed in zip(
+                sampling["sampling_seed_list"], validation_seeds
+            )
         ]
         validation = average_evaluations([run["validation"] for run in by_seed])
         testing = average_evaluations([run["test"] for run in by_seed])
@@ -126,14 +137,22 @@ class DefaultReport(Report):
             for seed in sample_seeds:
                 seed_all(seed)
                 tokens = generate(
-                    model, 4, config.length, config.vocab,
-                    steps=SAMPLE_NFE - 1, device=device,
-                    **pruning_options(sampling),
+                    model,
+                    4,
+                    config.length,
+                    config.vocab,
+                    steps=SAMPLE_NFE - 1,
+                    device=device,
+                    sampler=sampling["sampler"],
                 )
                 for row in tokens.cpu().tolist():
                     text = "".join(ALPHABET[token] for token in row)
-                    texts.append(f"seed {seed}\n{text}" if len(sample_seeds) > 1 else text)
-                    sample_rows.append([seed, text] if len(sample_seeds) > 1 else [text])
+                    texts.append(
+                        f"seed {seed}\n{text}" if len(sample_seeds) > 1 else text
+                    )
+                    sample_rows.append(
+                        [seed, text] if len(sample_seeds) > 1 else [text]
+                    )
             (run_path / "samples.txt").write_text("\n\n".join(texts))
             (report_path / "samples.txt").write_text("\n\n".join(texts))
             import wandb

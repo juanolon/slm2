@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from argparse import Namespace
+from importlib.resources import files
 from pathlib import Path
 from typing import Any
 
@@ -14,11 +15,9 @@ from slm.common.seeds import SAMPLE_SEED
 from slm.slm.core import (
     one_hot_tokens,
     predict_log_probs,
-    repair_empty,
-    reverse_probs,
     survival_ratio,
 )
-from slm.slm.sampling import protected_prune_step, confidence_gated_prune_step, topk_prune_step
+from slm.slm.samplers import get_sampler
 
 from .data import decode_board
 from .evaluation import sudoku_scores
@@ -26,42 +25,20 @@ from .report import _load_report, _start_report
 from .task import clamp_clues, initial_candidates
 
 
-def prune_step(model, candidate_mask, earlier_time, time, generator=None):
-    """Mirror core.prune_step; additionally return this transition's diagnostics."""
-    with torch.no_grad():
-        # TODO: add temperature to predict_log_probs
-        clean_probabilities = (
-            predict_log_probs(model, candidate_mask, time.float()).double().exp()
-        )
-        probs = reverse_probs(
-            clean_probabilities, candidate_mask, earlier_time.double(), time.double()
-        )
-        uniform_draws = torch.rand(
-            probs.shape, dtype=torch.float64, device=probs.device, generator=generator
-        )
-        sampled = uniform_draws < probs
-        repaired = repair_empty(sampled, probs)
-        return repaired, {
-            "before": candidate_mask[0].cpu().tolist(),
-            "model_probability": clean_probabilities[0].cpu().tolist(),
-            "retention_probability": probs[0].cpu().tolist(),
-            "draws": uniform_draws[0].cpu().tolist(),
-            "sampled": sampled[0].cpu().tolist(),
-            "repaired": repaired[0].cpu().tolist(),
-        }
-
-
 def solve_sudoku(
-    model, questions, steps, generator=None, use_protected_prune_step=False,
-    *, use_confidence_gated_prune_step=False, use_topk_prune_step=False,
+    model,
+    questions,
+    steps,
+    generator=None,
+    *,
+    sampler="default",
 ):
     """Mirror evaluation.solve_sudoku for one board, returning recorded frames too."""
     if questions.ndim != 2 or len(questions) != 1 or questions.shape[1] not in (16, 81):
         raise ValueError("Expected one 4x4 or 9x9 question, with shape (1, cells)")
     if type(steps) is not int or steps < 1:
         raise ValueError("steps must be a positive integer")
-    if sum((use_protected_prune_step, use_confidence_gated_prune_step, use_topk_prune_step)) > 1:
-        raise ValueError("Pruning modes are mutually exclusive")
+    pruning = get_sampler(sampler)
     old_mode = model.training
     frames = []
     model.eval()
@@ -94,17 +71,9 @@ def solve_sudoku(
                 )
                 earlier = torch.full_like(time, (index - 1) / steps)
 
-                if use_protected_prune_step or use_confidence_gated_prune_step or use_topk_prune_step:
-                    pruning = (topk_prune_step if use_topk_prune_step else
-                               confidence_gated_prune_step if use_confidence_gated_prune_step
-                               else protected_prune_step)
-                    candidates, frame = pruning(
-                        model, candidates, earlier, time, generator, record=True
-                    )
-                else:
-                    candidates, frame = prune_step(
-                        model, candidates, earlier, time, generator
-                    )
+                candidates, frame = pruning(
+                    model, candidates, earlier, time, generator, record=True
+                )
                 candidates = clamp_clues(candidates, questions)
                 frame.update(
                     kind="transition",
@@ -245,15 +214,16 @@ class HeatmapReport(Report):
         device_question = question.to(args.device)
         seeds = sampling["sampling_seed_list"]
         runs = []
-        use_protected_prune_step = sampling["protected_prune_step"]
         for sampling_seed in seeds:
             generator = torch.Generator(device=device_question.device).manual_seed(
                 sampling_seed
             )
             trajectory = solve_sudoku(
-                model, device_question[None], steps, generator, use_protected_prune_step,
-                use_confidence_gated_prune_step=sampling["confidence_gated_prune_step"],
-                use_topk_prune_step=sampling["topk_prune_step"],
+                model,
+                device_question[None],
+                steps,
+                generator,
+                sampler=sampling["sampler"],
             )
             prediction = torch.tensor(trajectory["prediction"], dtype=torch.long)
             runs.append(
@@ -323,5 +293,7 @@ def write_html(path: Path, data):
     payload = json.dumps(data, separators=(",", ":"), allow_nan=False).replace(
         "<", "\\u003c"
     )
-    template = files("slm.sudoku").joinpath("trajectory.html").read_text(encoding="utf-8")
+    template = (
+        files("slm.sudoku").joinpath("trajectory.html").read_text(encoding="utf-8")
+    )
     path.write_text(template.replace("__TRAJECTORY_DATA__", payload), encoding="utf-8")

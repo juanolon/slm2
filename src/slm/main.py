@@ -8,6 +8,7 @@ from pathlib import Path
 from slm.common.config import load_config
 from slm.common.contracts import TaskRunner
 from slm.defaults import DEFAULT_CONFIG
+from slm.slm.samplers import SAMPLERS
 
 
 def positive_int(value: str) -> int:
@@ -41,7 +42,8 @@ def add_general_arguments(parser):
         help="tracking mode (default: online)",
     )
     general.add_argument(
-        "--project", help="W&B project; reports append -report to this or the training project"
+        "--project",
+        help="W&B project; reports append -report to this or the training project",
     )
     general.add_argument("--entity", help="W&B account or team")
     general.add_argument(
@@ -80,29 +82,45 @@ def build_report_command(commands):
     text8, sudoku = add_tasks(parser)
     for task in (text8, sudoku):
         seeds = task.add_mutually_exclusive_group()
-        seeds.add_argument("--sampling-seed", type=int,
-                           help="Run once using this seed")
-        seeds.add_argument("--sampling-seeds", type=positive_int,
-                           help="Generate N distinct random seeds and average N runs")
-        pruning = task.add_mutually_exclusive_group()
-        pruning.add_argument("--protected-prune-step", action="store_true",
-                             help="Use protected pruning for Sudoku evaluation and generated samples")
-        pruning.add_argument("--topk-prune-step", action="store_true",
-                             help="Prune the top five most confident unresolved cells")
-        pruning.add_argument("--confidence-gated-prune-step", action="store_true",
-                             help="Apply protected pruning only to confidence-selected cells")
+        seeds.add_argument("--sampling-seed", type=int, help="Run once using this seed")
+        seeds.add_argument(
+            "--sampling-seeds",
+            type=positive_int,
+            help="Generate N distinct random seeds and average N runs",
+        )
+        task.add_argument(
+            "--sampler",
+            choices=SAMPLERS,
+            default="default",
+            help="Sampling algorithm (default: default)",
+        )
     text8.add_argument("--report", choices=("default",), default="default")
     sudoku.add_argument(
-        "--report", choices=("default", "sweep", "heatmap"), default="default",
+        "--report",
+        choices=("default", "sweep", "heatmap"),
+        default="default",
         help="Report implementation: basic, sampling sweep, or one-board heatmap",
     )
     sudoku.add_argument(
         "--legacy", action="store_true", help="Load a legacy notebook Sudoku checkpoint"
     )
-    sudoku.add_argument("--board-id", type=int, default=0, help="Heatmap: zero-based index in the selected test split")
-    sudoku.add_argument("--weights", choices=("ema", "raw"), default="ema", help="Heatmap: checkpoint weights to inspect")
-    sudoku.add_argument("--sampling-steps", type=positive_int,
-                        help="Default/heatmap sampling budget (defaults to report_steps or sample_steps)")
+    sudoku.add_argument(
+        "--board-id",
+        type=int,
+        default=0,
+        help="Heatmap: zero-based index in the selected test split",
+    )
+    sudoku.add_argument(
+        "--weights",
+        choices=("ema", "raw"),
+        default="ema",
+        help="Heatmap: checkpoint weights to inspect",
+    )
+    sudoku.add_argument(
+        "--sampling-steps",
+        type=positive_int,
+        help="Default/heatmap sampling budget (defaults to report_steps or sample_steps)",
+    )
 
 
 def build_smoke_command(commands):
@@ -130,7 +148,8 @@ def main(argv: list[str] | None = None) -> int:
     runner: TaskRunner = module.Runner()
     try:
         args.config = (
-            DEFAULT_CONFIG if args.command == "smoke"
+            DEFAULT_CONFIG
+            if args.command == "smoke"
             else load_config(args.experiment, args.task)
         )
         runner.validate_config(args.config)

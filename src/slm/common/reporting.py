@@ -1,7 +1,8 @@
-"""Shared report-only seed selection and scalar score averaging."""
 from __future__ import annotations
 
 from secrets import SystemRandom
+
+from slm.slm.samplers import get_sampler
 
 
 def generate_seeds(count):
@@ -10,10 +11,8 @@ def generate_seeds(count):
 
 
 def sampling_settings(args, default_seed):
-    if sum(bool(getattr(args, name, False)) for name in (
-        "protected_prune_step", "confidence_gated_prune_step", "topk_prune_step"
-    )) > 1:
-        raise ValueError("Pruning modes are mutually exclusive")
+    sampler = getattr(args, "sampler", "default")
+    pruning = get_sampler(sampler)
     count = getattr(args, "sampling_seeds", None)
     seed = getattr(args, "sampling_seed", None)
     if count is not None:
@@ -28,30 +27,19 @@ def sampling_settings(args, default_seed):
         "sampling_seed": seeds[0] if len(seeds) == 1 else None,
         "sampling_seeds": len(seeds),
         "sampling_seed_list": seeds,
-        "protected_prune_step": getattr(args, "protected_prune_step", False),
-        "confidence_gated_prune_step": getattr(args, "confidence_gated_prune_step", False),
-        "topk_prune_step": getattr(args, "topk_prune_step", False),
-    }
-
-
-def pruning_options(sampling):
-    """Only pass enabled options, preserving default solver call signatures."""
-    return {
-        f"use_{name}": True
-        for name in ("protected_prune_step", "confidence_gated_prune_step", "topk_prune_step")
-        if sampling.get(name, False)
+        "sampler": sampler,
+        "sampler_note": (pruning.__doc__ or "").strip(),
     }
 
 
 def phase_seeds(args, sampling, default_seed):
-    if (getattr(args, "sampling_seed", None) is not None
-            or getattr(args, "sampling_seeds", None) is not None):
+    if (
+        getattr(args, "sampling_seed", None) is not None
+        or getattr(args, "sampling_seeds", None) is not None
+    ):
         return sampling["sampling_seed_list"]
     return [default_seed]
 
 
 def mean_scores(scores):
-    return {
-        key: sum(score[key] for score in scores) / len(scores)
-        for key in scores[0]
-    }
+    return {key: sum(score[key] for score in scores) / len(scores) for key in scores[0]}
