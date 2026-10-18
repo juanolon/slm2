@@ -275,7 +275,7 @@ class HeatmapReport(Report):
         html_path = report_path / "heatmap_report.html"
         try:
             write_html(html_path, payload)
-            tracker.html("report/heatmap/html", html_path)
+            tracker.html(html_path)
             tracker.log(
                 completed,
                 {f"report/heatmap/{key}": value for key, value in scores.items()},

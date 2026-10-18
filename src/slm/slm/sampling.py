@@ -249,12 +249,6 @@ def topk_prune_step(
             clean_probabilities + (1.0 - clean_probabilities) * baseline_retention
         ).masked_fill(~candidate_mask, 0.0)
 
-        probs = torch.where(
-            selected_cells.unsqueeze(-1),
-            stronger_probs,
-            probs,
-        )
-
         uniform_draws = torch.rand(
             probs.shape,
             dtype=torch.float64,
