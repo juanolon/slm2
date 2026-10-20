@@ -39,7 +39,12 @@ class DefaultReport(Report):
             args
         )
         evaluation_config = SimpleNamespace(
-            **{**vars(config), "sample_steps": steps, "sampling_steps": steps, **sampling}
+            **{
+                **vars(config),
+                "sample_steps": steps,
+                "sampling_steps": steps,
+                **sampling,
+            }
         )
         device = torch.device(args.device)
         by_seed = [
@@ -162,13 +167,6 @@ class SweepReport(Report):
             (report_path / "sudoku_samples.json").write_text(
                 json.dumps(samples, indent=2)
             )
-            import wandb
-
-            artifact = wandb.Artifact(
-                f"sudoku-report-{report_path.name}", type="report"
-            )
-            artifact.add_file(str(report_path / "sudoku_report.json"))
-            tracker.run.log_artifact(artifact)
         except BaseException:
             tracker.finish(exit_code=1)
             raise
@@ -243,7 +241,8 @@ def _start_report(args, config, report, tracking):
         vars(args.config),
         name=args.name or tracking.get("name") or config["objective"],
         mode=args.wandb_mode or tracking["mode"],
-        project=getattr(args.config, "project", None) or f"{args.project or tracking['project']}-report",
+        project=getattr(args.config, "project", None)
+        or f"{args.project or tracking['project']}-report",
         entity=args.entity if args.entity is not None else tracking.get("entity"),
         resume=False,
     )

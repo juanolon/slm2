@@ -12,7 +12,7 @@ from slm.slm.core import (
     sample_forward,
     sample_steps,
 )
-from slm.slm.samplers import get_sampler
+from slm.slm.samplers import create_sampler
 
 from .data import gather_windows
 
@@ -107,7 +107,6 @@ def generate(
     sampler="default",
 ):
     assert steps >= 1
-    pruning = get_sampler(sampler)
     old = model.training
     model.eval()
     try:
@@ -115,6 +114,7 @@ def generate(
             candidates = torch.ones(
                 batch, length, vocabulary_size, dtype=torch.bool, device=device
             )
+            pruning = create_sampler(sampler, candidates)
             history = [candidates.sum(-1).cpu()]
             for index in range(steps, 0, -1):
                 time = torch.full(

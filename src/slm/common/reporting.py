@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from secrets import SystemRandom
 
-from slm.slm.samplers import get_sampler
-
 
 def generate_seeds(count):
     # Independent of the process's seeded RNGs; unique and persisted in reports.
@@ -12,11 +10,16 @@ def generate_seeds(count):
 
 def sampling_settings(args, default_seed):
     if hasattr(args, "sampling_seed_list"):
-        return {key: getattr(args, key) for key in (
-            "sampling_seed", "sampling_seeds", "sampling_seed_list", "sampler", "sampler_note"
-        )}
+        return {
+            key: getattr(args, key)
+            for key in (
+                "sampling_seed",
+                "sampling_seeds",
+                "sampling_seed_list",
+                "sampler",
+            )
+        }
     sampler = getattr(args, "sampler", None) or "default"
-    pruning = get_sampler(sampler)
     count = getattr(args, "sampling_seeds", None)
     seed = getattr(args, "sampling_seed", None)
     if count is not None:
@@ -32,7 +35,6 @@ def sampling_settings(args, default_seed):
         "sampling_seeds": len(seeds),
         "sampling_seed_list": seeds,
         "sampler": sampler,
-        "sampler_note": (pruning.__doc__ or "").strip(),
     }
 
 

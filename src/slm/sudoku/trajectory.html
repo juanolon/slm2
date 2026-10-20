@@ -133,12 +133,6 @@
         margin-top: 5px;
         overflow-wrap: anywhere;
       }
-      .danger {
-        color: #b91c1c;
-      }
-      .good {
-        color: #15803d;
-      }
       .candidate-board {
         display: grid;
         gap: 2px;
@@ -281,12 +275,31 @@
       }
       .expanded-panel.is-sticky {
         position: sticky;
-        top: 8px;
+        top: 0;
+        bottom: auto;
         z-index: 20;
-        max-height: calc(100vh - 16px);
+        max-height: 40vh;
         overflow-y: auto;
         box-shadow: 0 4px 14px #17203333;
         border-color: #2563eb;
+      }
+      .time-controls {
+        position: sticky;
+        top: 0;
+        z-index: 30;
+        background: #fff;
+        padding: 10px;
+        border: 1px solid #cbd5e1;
+        box-shadow: 0 2px 5px #17203322;
+      }
+      .time-controls small {
+        display: block;
+        color: #475569;
+      }
+      output {
+        display: block;
+        min-height: 1.5em;
+        font-variant-numeric: tabular-nums;
       }
     </style>
   </head>
@@ -303,37 +316,31 @@
         <pre id="averageOutcomes"></pre>
       </details>
       <p>
-        Colors are arithmetic mean probabilities across all seeds, including
-        mask-forced zeros. Counts are mean candidate counts. The candidate board
-        shows digits present in <b>any</b> seed, with exact survival counts
-        underneath (surviving seeds / total seeds). It is not one sampled board.
-        Cell borders: amber = reference present in some seeds, red = absent,
-        blue = selected. Selected status cells have alternating
-        blue/status-color segments. Bold digits mark the reference; there are no
-        green borders. No majority-vote solution is used to calculate scores. A
-        bold overview border means every seed is a singleton; a bold expanded
-        border means that digit survives in every seed.
+        Colors are arithmetic mean values across all seeds. Probability means
+        include mask-forced zeros; J mode averages cell costs. Counts are mean
+        candidate counts. The candidate board shows digits present in
+        <b>any</b> seed, with exact survival counts underneath (surviving seeds
+        / total seeds). It is not one sampled board. Cell borders: amber =
+        reference present in some seeds, red = absent, blue = selected. Selected
+        status cells have alternating blue/status-color segments. Bold digits
+        mark the reference; there are no green borders. No majority-vote
+        solution is used to calculate scores. A bold overview border means every
+        seed is a singleton; a bold expanded border means that digit survives in
+        every seed.
       </p>
       <label
-        >Mean probability
-        <select id="averageMode">
-          <option value="model_probability">Model digit probability</option>
-          <option value="retention_probability">
-            Sampler retention probability
-          </option>
-        </select></label
+        >Mean color
+        <select id="averageMode"></select></label
       ><label
         ><input id="averagePin" type="checkbox" />Pin mean inspector</label
       >
+      <h3 id="averageTimelineTitle">Timeline</h3>
       <div id="averageTimelineScroll" class="scroll">
         <canvas id="averageTimeline"></canvas>
         <div id="averageTimelineCursor" class="time-cursor"></div>
       </div>
-      <h3>Mean reference-digit probability (blank cells)</h3>
-      <div id="averageOverviewScroll" class="scroll">
-        <canvas id="averageOverview"></canvas>
-        <div id="averageOverviewCursor" class="time-cursor"></div>
-      </div>
+      <output id="averageTimelineHover" aria-live="polite"></output>
+      <p id="averageColorNote"></p>
       <div id="averageExpandedPanel" class="expanded-panel">
         <div class="panel-heading">
           <h3 id="averageExpandedTitle">Mean candidate probabilities</h3>
@@ -353,24 +360,32 @@
           <div id="averageExpandedCursor" class="time-cursor"></div>
         </div>
       </div>
+      <h3>Mean cell values (blank cells)</h3>
+      <div id="averageOverviewScroll" class="scroll">
+        <canvas id="averageOverview"></canvas>
+        <div id="averageOverviewCursor" class="time-cursor"></div>
+      </div>
       <pre id="averageInspection"></pre>
       <h3>Candidate survival frequencies through time</h3>
-      <label
-        >Time
-        <input
-          id="averageSlider"
-          type="range"
-          min="0"
-          step="1"
-          value="0" /></label
-      ><label
-        >Candidate state
-        <select id="averageStage">
-          <option value="after_frequency">After transition</option>
-          <option value="before_frequency">Before transition</option>
-        </select></label
-      >
-      <p id="averageFrameLabel"></p>
+      <div id="averageTimeControls" class="time-controls">
+        <label
+          >Time
+          <input
+            id="averageSlider"
+            type="range"
+            min="0"
+            step="1"
+            value="0" /></label
+        ><label
+          >Candidate state
+          <select id="averageStage">
+            <option value="after_frequency">After transition</option>
+            <option value="before_frequency">Before transition</option>
+          </select></label
+        >
+        <p id="averageFrameLabel"></p>
+        <small>← / → move time</small>
+      </div>
       <p id="averageFrameSummary"></p>
       <div class="scroll">
         <div id="averageBoard" class="candidate-board"></div>
@@ -388,22 +403,23 @@
         <details id="info">
           <summary><b>Info: identity and outcome</b></summary>
           <pre id="metadata"></pre>
+          <button id="downloadData" type="button">
+            Download complete report data (JSON)
+          </button>
+          <p>
+            The HTML embeds the data used by every plot, including
+            configuration, masks, model probabilities, removal decisions, and
+            objective contributions.
+          </p>
         </details>
         <div id="boards" class="boards"></div>
       </section>
       <section>
-        <h2>Probability and cell filters</h2>
+        <h2>Color and cell filters</h2>
         <label
-          >Probability
-          <select id="mode">
-            <option value="model_probability">
-              Model digit probability (masked, normalized)
-            </option>
-            <option value="retention_probability">
-              Sampler retention probability (Bernoulli inclusion)
-            </option>
-          </select></label
-        >
+          >Color
+          <select id="mode"></select
+        ></label>
         <label><input id="clues" type="checkbox" />Show fixed clues</label>
         <label
           >Cells
@@ -415,21 +431,23 @@
           </select></label
         >
         <p>
-          <b>Timing:</b> color = probability <b>before</b> pruning;
-          borders/counts = candidates <b>after</b> sampling, repair/protection
-          and clue enforcement. Initial state is separate; final decoding
-          chooses a digit without changing the candidate set.
+          <b>Timing:</b> model p and proposal q are from before pruning; cell J
+          is after the round; borders/counts = candidates <b>after</b> sampling,
+          repair/protection and clue enforcement. Initial state is separate;
+          final decoding chooses a digit without changing the candidate set.
         </p>
         <div class="legend">
           <span
-            >0 <span class="gradient"></span> 1 (fixed probability scale)</span
-          ><span class="masked">Already eliminated: zero forced by mask</span
+            ><span id="colorMinimum">0</span>
+            <span id="colorGradient" class="gradient"></span>
+            <span id="colorScale"></span></span
+          ><span id="maskLegend" class="masked"
+            >Already eliminated: zero forced by mask</span
           ><span style="color: #dc2626">▲ first reference loss</span
           ><span>▣ singleton / surviving digit border</span
           ><span style="color: #9333ea"
-            >━ compact: cell selected for update (including forced
-            selection)</span
-          ><span>— probability not applicable</span
+            >━ compact: cell selected or updated this round</span
+          ><span>— value not applicable</span
           ><span
             >✓ final selected digit; compact ✓/× = reference
             match/mismatch</span
@@ -438,31 +456,50 @@
         <p id="modeNote" class="hint"></p>
       </section>
       <section>
-        <h2>Timeline: timestep and reverse survival ratio</h2>
+        <h2 id="timelineTitle">Timeline: timestep and actual excess</h2>
         <p>
-          Click a column to freeze the whole-board view at that transition. Each
-          label shows actual step, pre-pruning timestep t, and schedule ratio s.
-          The blue line underneath is s on a fixed 0–1 scale; s is a schedule
-          factor, not the observed surviving-cell fraction.
+          Actual excess is the number of surviving candidates above one per
+          cell. Budgeted runs also show the round's total J(S) on a separate
+          scale. Hover a column for exact values and how many candidates were
+          pruned after repair/protection; click to select that round.
         </p>
         <div id="timelineScroll" class="scroll">
           <canvas id="timeline"></canvas>
           <div id="timelineCursor" class="time-cursor"></div>
         </div>
+        <output id="timelineHover" aria-live="polite"></output>
       </section>
-      <section>
-        <h2>Compact overview: reference-digit probability</h2>
+      <section id="budgetSection" hidden>
+        <h2>Budgeted pruning: what changed this round</h2>
+        <p id="budgetSummary"></p>
+        <h3>Each cell's contribution to J(S)</h3>
         <p>
-          One row per originally blank cell, in board-position order. Numbers
-          are candidate counts after the column; hover/click for before/after
-          counts and exact probabilities. Hatching marks masked zeros after
-          elimination.
+          After this round, each bar is Jᵢ = −log Rᵢ: the model mass discarded
+          in that cell. Bars sum to this round's J(S), not a cumulative run
+          loss. Click a bar to select its cell.
         </p>
-        <div id="overviewScroll" class="scroll">
-          <canvas id="overview"></canvas>
-          <div id="overviewCursor" class="time-cursor"></div>
+        <div class="scroll"><canvas id="budgetCellCosts"></canvas></div>
+        <h3>Recorded removals</h3>
+        <p>
+          The actual removals in this round. p is frozen at the model call; ΔJ
+          is the cost of that removal, and J is the board cost after it. Click a
+          row to inspect that cell and digit.
+        </p>
+        <div class="table-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Cell</th>
+                <th>Digit</th>
+                <th>p</th>
+                <th>ΔJ</th>
+                <th>J after removal</th>
+              </tr>
+            </thead>
+            <tbody id="budgetRemovals"></tbody>
+          </table>
         </div>
-        <p id="empty"></p>
       </section>
       <section id="expandedPanel" class="expanded-panel">
         <div class="panel-heading">
@@ -489,6 +526,21 @@
         </div>
       </section>
       <section>
+        <h2>Compact overview: selected color value</h2>
+        <p>
+          One row per originally blank cell, in board-position order. Numbers
+          are candidate counts after the column; hover/click for before/after
+          counts and exact probabilities. Hatching marks masked zeros after
+          elimination.
+        </p>
+        <div id="overviewScroll" class="scroll">
+          <canvas id="overview"></canvas>
+          <div id="overviewCursor" class="time-cursor"></div>
+        </div>
+        <p id="empty"></p>
+      </section>
+
+      <section>
         <h2>Box inspection</h2>
         <label
           ><input id="pin" type="checkbox" />Pin inspection (clicking a box pins
@@ -500,24 +552,27 @@
           resume hover previews.
         </p>
         <div id="inspection"></div>
-        <details>
+        <details id="inspectionIntermediate">
           <summary>Intermediate candidate sets (repair/protection)</summary>
           <pre id="inspectionDetails"></pre>
         </details>
       </section>
       <section>
         <h2>Whole-board candidates through time</h2>
-        <label
-          >Time
-          <input
-            id="stepSlider"
-            type="range"
-            min="0"
-            step="1"
-            value="0" /></label
-        ><button id="previousStep">Previous</button>
-        <button id="nextStep">Next</button>
-        <p id="frameLabel"></p>
+        <div id="timeControls" class="time-controls">
+          <label
+            >Time
+            <input
+              id="stepSlider"
+              type="range"
+              min="0"
+              step="1"
+              value="0" /></label
+          ><button id="previousStep">Previous</button>
+          <button id="nextStep">Next</button>
+          <p id="frameLabel"></p>
+          <small>← / → move time</small>
+        </div>
         <label
           >Candidate state
           <select id="stage">
@@ -538,36 +593,6 @@
         </p>
         <div class="scroll">
           <div id="candidateBoard" class="candidate-board"></div>
-        </div>
-        <h3>Cross-cell comparison at this time</h3>
-        <label
-          >Probability target
-          <select id="compareTarget">
-            <option value="reference">Reference digit in each cell</option>
-            <option value="selected">Selected digit across all cells</option>
-          </select></label
-        ><label
-          ><input id="changedOnly" type="checkbox" />Only cells with candidate
-          changes</label
-        >
-        <p id="compareScope"></p>
-        <div class="table-scroll">
-          <table>
-            <thead>
-              <tr>
-                <th>Cell</th>
-                <th>Target</th>
-                <th>Before candidates</th>
-                <th>After candidates</th>
-                <th>Removed / added</th>
-                <th>Model p before</th>
-                <th>Retention q</th>
-                <th>Model p next call</th>
-                <th>Δ model p</th>
-              </tr>
-            </thead>
-            <tbody id="comparisonRows"></tbody>
-          </table>
         </div>
       </section>
     </details>
@@ -595,6 +620,7 @@
         rows = [];
       if (selected < 0) selected = 0;
       selectedDigit = D.reference[selected];
+      let activeTimeView = A ? "average" : "individual";
       const labelWidth = 140,
         rowHeight = 24,
         columns = F.map((_, i) => i),
@@ -633,6 +659,99 @@
           2,
         );
       }
+      const cellJScales = new WeakMap();
+      function cellJScale(frame) {
+        if (!cellJScales.has(frame))
+          cellJScales.set(
+            frame,
+            (frame.cell_objective_cost ?? []).reduce(
+              (maximum, value) => Math.max(maximum, value),
+              0,
+            ) || 1,
+          );
+        return cellJScales.get(frame);
+      }
+      function availableModes(frames) {
+        const modes = [["model_probability", "Model probability p"]];
+        if (frames.some((frame) => frame.cell_objective_cost))
+          modes.push([
+            "cell_objective_cost",
+            "Cell cost J after the round (normalized color)",
+          ]);
+        if (frames.some((frame) => frame.retention_probability))
+          modes.push(["retention_probability", "Pruning proposal q"]);
+        return modes;
+      }
+      function configureModes(select, frames) {
+        const previous = select.value,
+          modes = availableModes(frames);
+        select.replaceChildren();
+        modes.forEach(([value, label]) => {
+          const option = document.createElement("option");
+          option.value = value;
+          option.textContent = label;
+          select.appendChild(option);
+        });
+        select.value = modes.some(([value]) => value === previous)
+          ? previous
+          : "model_probability";
+      }
+      function valueAt(frame, cell, digit, mode) {
+        return mode === "cell_objective_cost"
+          ? frame.cell_objective_cost?.[cell]
+          : frame[mode]?.[cell]?.[digit];
+      }
+      function colorFraction(value, mode, frame) {
+        return Math.max(
+          0,
+          Math.min(
+            1,
+            value / (mode === "cell_objective_cost" ? cellJScale(frame) : 1),
+          ),
+        );
+      }
+      function colorFor(value, mode, frame) {
+        if (value === undefined || value === null) return "#e2e8f0";
+        const fraction = colorFraction(value, mode, frame);
+        return mode === "cell_objective_cost"
+          ? "rgb(" +
+              Math.round(255 - 70 * fraction) +
+              "," +
+              Math.round(255 - 225 * fraction) +
+              "," +
+              Math.round(255 - 225 * fraction) +
+              ")"
+          : "rgb(" +
+              Math.round(255 - 235 * fraction) +
+              "," +
+              Math.round(255 - 170 * fraction) +
+              "," +
+              Math.round(255 - 58 * fraction) +
+              ")";
+      }
+      function colorNote(mode) {
+        if (mode === "cell_objective_cost")
+          return "J colors are normalized separately per round: cell J / highest cell J in that round. White = zero cost; dark red = most model mass lost in this round. Lower J is better for this objective, not necessarily Sudoku correctness. This is accumulated cost per cell; the greedy loop minimizes each removal’s ΔJ, not these cell totals. Even tiny costs can be red: colors are not absolute comparisons across rounds or seeds. Inspection and tables retain raw J. Expanded digit rows share the cell’s color. Mean views average raw costs before color normalization.";
+        if (mode === "retention_probability")
+          return "Color = the Bernoulli pruning proposal q before repair/protection. It is not final survival probability; proposals for unselected cells are ignored.";
+        return "Color = masked model p at this call, on a fixed 0–1 scale. Counts and borders show candidates after the round.";
+      }
+      function updateColorNotes() {
+        const mode = $("mode").value;
+        $("modeNote").textContent = colorNote(mode);
+        $("maskLegend").hidden = mode === "cell_objective_cost";
+        $("colorMinimum").textContent =
+          mode === "cell_objective_cost" ? "0 (no cost)" : "0";
+        $("colorScale").textContent =
+          mode === "cell_objective_cost"
+            ? "1 (highest cost; normalized per round)"
+            : "1 (probability)";
+        $("colorGradient").style.background =
+          mode === "cell_objective_cost"
+            ? "linear-gradient(to right,#fff,#b91c1c)"
+            : "linear-gradient(to right,#fff,#1455c5)";
+        $("averageColorNote").textContent = colorNote($("averageMode").value);
+      }
       function matches(c) {
         const a = D.cells[c],
           f = $("filter").value;
@@ -643,94 +762,106 @@
           (f === "multiple" && a.multiple_until_decode)
         );
       }
-      function columnLabel(f) {
-        return f.kind === "initial"
-          ? "initial t=1 s=—"
-          : f.kind === "decode"
-            ? "decode t=0 s=—"
-            : "step " +
-              f.step +
-              " t=" +
-              f.time.toFixed(4) +
-              " s=" +
-              f.reverse_survival_ratio.toFixed(4);
+      function columnLabel(frame) {
+        return frame.kind === "initial"
+          ? "initial t=1"
+          : frame.kind === "decode"
+            ? "decode t=0"
+            : "step " + frame.step + " t=" + frame.time.toFixed(4);
       }
-      function mechanisms(f, c, d) {
-        if (f.kind === "initial")
-          return D.question[c] >= 0
-            ? ["Initial clue enforcement"]
-            : ["Initial unrestricted blank"];
-        if (f.kind === "decode")
+
+      function mechanisms(frame, cell, digit) {
+        if (frame.kind === "initial")
           return [
-            D.prediction[c] === d
-              ? "Selected by final decoding (mask unchanged)"
-              : "Not selected by final decoding (mask unchanged)",
+            D.question[cell] >= 0 ? "Initial clue" : "Initially available",
           ];
-        const result = [];
-        if (!f.before[c][d])
-          result.push(
-            "Unavailable before pruning: ordinary candidate masking forces probability to zero",
+        if (frame.kind === "decode")
+          return [
+            D.prediction[cell] === digit
+              ? "Selected by decoding"
+              : "Not selected by decoding",
+          ];
+        if (frame.cell_objective_cost) {
+          const index = frame.removal_events.findIndex(
+            (e) => e.cell === cell && e.removed_digit_index === digit,
           );
-        else
-          result.push(
-            f.sampled[c][d]
-              ? "Retained by Bernoulli sampling"
-              : "Removed by Bernoulli sampling",
-          );
-        if (f.cell_selected) {
-          result.push(
-            f.cell_selected[c]
-              ? f.top_k
-                ? "Cell selected by top-k confidence"
-                : f.cell_selection_forced?.[c]
-                  ? "Cell update forced (no cells selected)"
-                  : "Cell selected by confidence gate"
-              : "Cell not selected: input mask retained; Bernoulli proposal ignored",
-          );
-          if (f.cell_selected[c] && f.protected_digit_index?.[c] === d)
-            result.push("Kept by protected-digit enforcement");
-          else if (f.cell_selected[c] && f.sampled[c][d] !== f.repaired[c][d])
-            result.push("Changed by empty-set repair");
-        } else if (f.sampled[c][d] !== f.repaired[c][d])
-          result.push(
-            f.protected_digit_index?.[c] === d
-              ? "Kept by protected-digit enforcement"
-              : "Changed by empty-set repair",
-          );
-        if (f.repaired[c][d] !== f.after[c][d])
-          result.push("Changed by clue enforcement");
+          return [
+            !frame.before[cell][digit]
+              ? "Already excluded"
+              : index >= 0
+                ? "Removed #" + (index + 1) + " this round"
+                : "Kept this round",
+          ];
+        }
+        if (frame.cell_selected && !frame.cell_selected[cell])
+          return ["Cell not selected; input mask retained"];
+        const result = [
+          frame.sampled[cell][digit]
+            ? "Kept by pruning proposal"
+            : "Removed by pruning proposal",
+        ];
+        if (frame.protected_digit_index?.[cell] === digit)
+          result.push("Protected digit");
+        if (
+          frame.sampled[cell][digit] !== frame.repaired[cell][digit] &&
+          !frame.protected_digit_index
+        )
+          result.push("Empty-set repair");
+        if (frame.repaired[cell][digit] !== frame.after[cell][digit])
+          result.push("Clue enforcement");
         return result;
       }
-      function inspectionData(fi, c, d) {
-        const f = F[fi];
-        return {
-          cell: cellName(c),
-          digit: d + 1,
-          reference: D.reference[c] + 1,
-          step: f.step,
-          kind: f.kind,
-          time_before: f.time,
-          time_after: f.earlier_time,
-          reverse_survival_ratio: f.reverse_survival_ratio,
-          model_digit_probability: f.model_probability?.[c][d] ?? null,
-          sampler_retention_probability:
-            f.retention_probability?.[c][d] ?? null,
-          uniform_draw: f.draws?.[c][d] ?? null,
-          candidate_before: f.before[c][d],
-          candidate_after: f.after[c][d],
-          candidates_before: digits(f.before[c]),
-          candidates_after: digits(f.after[c]),
-          cell_confidence: f.cell_confidence?.[c] ?? null,
-          cell_selection_probability: f.cell_selection_probability?.[c] ?? null,
-          cell_selection_draw: f.cell_selection_draw?.[c] ?? null,
-          cell_selected: f.cell_selected?.[c] ?? null,
-          cell_selection_forced: f.cell_selection_forced?.[c] ?? null,
-          protected_digit: f.protected_digit_index
-            ? f.protected_digit_index[c] + 1
-            : null,
-          change_mechanism: mechanisms(f, c, d),
-          final_digit: D.prediction[c] + 1,
-        };
+      function inspectionData(fi, cell, digit) {
+        const frame = F[fi],
+          info = {
+            cell: cellName(cell),
+            digit: digit + 1,
+            reference: D.reference[cell] + 1,
+            kind: frame.kind,
+            step: frame.step,
+            time_before: frame.time,
+            time_after: frame.earlier_time,
+            candidate_before: frame.before[cell][digit],
+            candidate_after: frame.after[cell][digit],
+            candidates_before: digits(frame.before[cell]),
+            candidates_after: digits(frame.after[cell]),
+            change_mechanism: mechanisms(frame, cell, digit),
+          };
+        if (frame.model_probability)
+          info.model_digit_probability = frame.model_probability[cell][digit];
+        if (frame.cell_objective_cost) {
+          info.cell_objective_cost = frame.cell_objective_cost[cell];
+          const event = frame.removal_events.find(
+            (e) => e.cell === cell && e.removed_digit_index === digit,
+          );
+          if (event) {
+            info.incremental_cost = event.incremental_cost;
+            info.objective_cost_after_removal = event.objective_cost_after;
+          }
+        } else if (frame.kind === "transition") {
+          for (const field of [
+            "cell_confidence",
+            "cell_selection_probability",
+            "cell_selection_draw",
+            "cell_selected",
+            "cell_selection_forced",
+          ])
+            if (frame[field]) info[field] = frame[field][cell];
+          const applied = frame.cell_selected?.[cell] ?? true;
+          if (applied) {
+            if (frame.retention_probability)
+              info.sampler_retention_probability =
+                frame.retention_probability[cell][digit];
+            if (frame.draws) info.uniform_draw = frame.draws[cell][digit];
+            if (frame.protected_digit_index)
+              info.protected_digit = frame.protected_digit_index[cell] + 1;
+          }
+          if (frame.top_k !== undefined) info.top_k = frame.top_k;
+          if (frame.baseline_retention !== undefined && applied)
+            info.baseline_retention = frame.baseline_retention;
+        }
+        if (frame.kind === "decode") info.final_digit = D.prediction[cell] + 1;
+        return info;
       }
       function metric(root, label, value) {
         const card = document.createElement("div");
@@ -738,110 +869,78 @@
         const title = document.createElement("strong");
         title.textContent = label;
         const text = document.createElement("span");
-        text.textContent =
-          value === null || value === undefined
-            ? "Not applicable"
-            : String(value);
+        text.textContent = String(value);
         card.appendChild(title);
         card.appendChild(text);
         root.appendChild(card);
       }
-      function inspect(fi, c, d) {
-        const f = F[fi],
-          info = inspectionData(fi, c, d),
+      function inspect(fi, cell, digit) {
+        const frame = F[fi],
+          info = inspectionData(fi, cell, digit),
           root = $("inspection");
         root.replaceChildren();
         const title = document.createElement("h3");
         title.textContent =
-          info.cell +
-          " · digit " +
-          info.digit +
-          " (reference " +
-          info.reference +
-          ") · " +
-          columnLabel(f);
+          info.cell + " · digit " + info.digit + " · " + columnLabel(frame);
         root.appendChild(title);
         const cards = document.createElement("div");
         cards.className = "metrics";
+        const labels = {
+          model_digit_probability: "Model p before pruning",
+          cell_objective_cost: "Cell J after this round",
+          incremental_cost: "ΔJ of this removal",
+          objective_cost_after_removal: "Board J after this removal",
+          sampler_retention_probability: "Pruning proposal q",
+          uniform_draw: "Proposal draw u (u < q)",
+          protected_digit: "Protected digit",
+          cell_confidence: "Cell confidence (max p)",
+          cell_selection_probability: "Cell selection probability",
+          cell_selection_draw: "Cell selection draw",
+          cell_selected: "Cell selected",
+          cell_selection_forced: "Cell selection forced",
+          top_k: "Top k",
+          baseline_retention: "Baseline retention for selected cells",
+          final_digit: "Final decoded digit",
+        };
+        Object.entries(labels).forEach(([key, label]) => {
+          if (key in info) metric(cards, label, info[key]);
+        });
         metric(
           cards,
-          "Model digit probability p",
-          info.model_digit_probability,
-        );
-        metric(
-          cards,
-          "Sampler retention probability q",
-          info.sampler_retention_probability,
-        );
-        metric(cards, "Uniform draw u (kept if u < q)", info.uniform_draw);
-        if (f.cell_selected) {
-          metric(cards, "Cell confidence (max p)", info.cell_confidence);
-          metric(
-            cards,
-            "Cell selection probability (confidence²)",
-            info.cell_selection_probability,
-          );
-          metric(cards, "Cell selection draw", info.cell_selection_draw);
-          metric(
-            cards,
-            "Cell selected / forced",
-            info.cell_selected + " / " + info.cell_selection_forced,
-          );
-          metric(cards, "Protected digit", info.protected_digit);
-        }
-        metric(
-          cards,
-          "Candidate status",
-          (info.candidate_before ? "Available" : "Excluded") +
+          "Candidate",
+          (info.candidate_before ? "available" : "excluded") +
             " → " +
             (info.candidate_after ? "available" : "excluded"),
         );
         root.appendChild(cards);
         const sets = document.createElement("p");
         sets.textContent =
-          "Candidates (" +
-          info.candidates_before.length +
-          " → " +
-          info.candidates_after.length +
-          "): [" +
+          "Candidates: [" +
           info.candidates_before.join(", ") +
           "] → [" +
           info.candidates_after.join(", ") +
           "]";
         root.appendChild(sets);
-        const mechanism = document.createElement("strong");
-        mechanism.className =
-          info.candidate_before && !info.candidate_after ? "danger" : "";
-        mechanism.textContent = info.change_mechanism.join("; ");
-        root.appendChild(mechanism);
-        const refState = document.createElement("p");
-        refState.className = f.after[c][D.reference[c]] ? "good" : "danger";
-        refState.textContent = f.after[c][D.reference[c]]
-          ? "Reference digit still available."
-          : "Reference digit lost; first elimination at step " +
-            D.cells[c].first_loss +
-            ".";
-        root.appendChild(refState);
+        const note = document.createElement("strong");
+        note.textContent = info.change_mechanism.join("; ");
+        root.appendChild(note);
+        $("inspectionIntermediate").hidden =
+          frame.kind !== "transition" || !frame.sampled;
         $("inspectionDetails").textContent = JSON.stringify(
-          {
-            time_before: info.time_before,
-            time_after: info.time_after,
-            reverse_survival_ratio: info.reverse_survival_ratio,
-            after_sampling: digits(f.sampled[c]),
-            after_repair_or_protection: digits(f.repaired[c]),
-            cell_confidence: info.cell_confidence,
-            cell_selection_probability: info.cell_selection_probability,
-            cell_selection_draw: info.cell_selection_draw,
-            cell_selected: info.cell_selected,
-            cell_selection_forced: info.cell_selection_forced,
-            protected_digit: info.protected_digit,
-            final_digit: info.final_digit,
-          },
+          frame.sampled
+            ? {
+                after_sampling: digits(frame.sampled[cell]),
+                after_repair_or_protection: digits(frame.repaired[cell]),
+                ...info,
+              }
+            : info,
           null,
           2,
         );
       }
+
       function selectCell(c, d = D.reference[c]) {
+        activeTimeView = "individual";
         selected = c;
         selectedDigit = d;
         if (D.question[c] >= 0) $("clues").checked = true;
@@ -850,16 +949,14 @@
         render();
         inspect(selectedColumn, c, d);
       }
-      function boardCell(c) {
-        selectCell(
-          c,
-          $("compareTarget").value === "selected"
-            ? selectedDigit
-            : D.reference[c],
-        );
+      function boardCell(cell) {
+        selectCell(cell, D.reference[cell]);
       }
+
       function selectTime(fi) {
+        activeTimeView = "individual";
         selectedColumn = Math.max(0, Math.min(F.length - 1, fi));
+        $("timelineHover").textContent = timelineText(F[selectedColumn]);
         moveCursors();
         drawWholeBoard();
         inspect(selectedColumn, selected, selectedDigit);
@@ -925,19 +1022,14 @@
           ctx.fill();
         }
       }
-      function paint(ctx, x, y, c, d, f, compact) {
-        const p = f[$("mode").value]?.[c][d];
-        const masked = f.kind !== "initial" && !f.before[c][d];
-        if (p === undefined || p === null) ctx.fillStyle = "#e2e8f0";
-        else
-          ctx.fillStyle =
-            "rgb(" +
-            Math.round(255 - 235 * p) +
-            "," +
-            Math.round(255 - 170 * p) +
-            "," +
-            Math.round(255 - 58 * p) +
-            ")";
+      function paint(ctx, x, y, cell, digit, frame, compact) {
+        const mode = $("mode").value,
+          value = valueAt(frame, cell, digit, mode);
+        const masked =
+          mode !== "cell_objective_cost" &&
+          frame.kind !== "initial" &&
+          !frame.before[cell][digit];
+        ctx.fillStyle = colorFor(value, mode, frame);
         ctx.fillRect(x, y, width, rowHeight);
         if (masked) {
           ctx.fillStyle = "#ededed";
@@ -954,33 +1046,46 @@
           ctx.stroke();
         }
         const survives = compact
-          ? digits(f.after[c]).length === 1
-          : f.after[c][d];
+          ? digits(frame.after[cell]).length === 1
+          : frame.after[cell][digit];
         ctx.strokeStyle = survives ? "#172033" : "#cbd5e1";
         ctx.lineWidth = survives ? 2 : 0.5;
         ctx.strokeRect(x + 1, y + 1, width - 2, rowHeight - 2);
         if (compact && width >= 12) {
           ctx.fillStyle =
-            masked || p === undefined || p < 0.65 ? "#172033" : "white";
-          ctx.fillText(digits(f.after[c]).length, x + width / 2 - 3, y + 17);
-        } else if ((p === undefined || p === null) && width >= 12) {
+            masked ||
+            value === undefined ||
+            colorFraction(value, mode, frame) < 0.65
+              ? "#172033"
+              : "white";
+          ctx.fillText(
+            digits(frame.after[cell]).length,
+            x + width / 2 - 3,
+            y + 17,
+          );
+        } else if (value === undefined && width >= 12) {
           ctx.fillStyle = "#64748b";
           ctx.fillText("—", x + 3, y + 17);
         }
         if (
-          f.kind === "decode" &&
+          frame.kind === "decode" &&
           width >= 12 &&
-          (compact || D.prediction[c] === d)
+          (compact || D.prediction[cell] === digit)
         ) {
           ctx.fillStyle = "#172033";
-          ctx.fillText(D.prediction[c] === d ? "✓" : "×", x + 2, y + 22);
+          ctx.fillText(D.prediction[cell] === digit ? "✓" : "×", x + 2, y + 22);
         }
-        if (compact && f.cell_selected?.[c]) {
+        const updated =
+          frame.cell_selected?.[cell] ??
+          (frame.cell_objective_cost &&
+            frame.before[cell].some((v, d) => v !== frame.after[cell][d]));
+        if (compact && updated) {
           ctx.fillStyle = "#9333ea";
           ctx.fillRect(x + 1, y + rowHeight - 5, width - 2, 3);
         }
-        markReferenceLoss(ctx, x, y, c, f, d, compact);
+        markReferenceLoss(ctx, x, y, cell, frame, digit, compact);
       }
+
       function moveCursors() {
         ["timelineCursor", "overviewCursor", "expandedCursor"].forEach((id) => {
           $(id).style.left = labelWidth + selectedColumn * width + "px";
@@ -1059,35 +1164,223 @@
           if (d === selectedDigit) highlightRow(ctx, $("expanded"), y);
         }
       }
+      function costRange(values) {
+        const finite = values.filter(Number.isFinite),
+          minimum = Math.min(0, ...finite),
+          maximum = Math.max(0, ...finite);
+        return {
+          minimum,
+          maximum: maximum === minimum ? minimum + 1e-12 : maximum,
+        };
+      }
+      function plotLines(ctx, series, xAt, top, height, maximum, minimum = 0) {
+        series.forEach(({ color, label, values }) => {
+          ctx.fillStyle = color;
+          ctx.fillText(label, 3, top);
+          ctx.strokeStyle = color;
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          let started = false;
+          values.forEach((value, i) => {
+            if (!Number.isFinite(value)) {
+              started = false;
+              return;
+            }
+            const x = xAt(i),
+              y =
+                top +
+                height -
+                (height * (value - minimum)) / (maximum - minimum);
+            ctx.fillRect(x - 2, y - 2, 4, 4);
+            if (started) ctx.lineTo(x, y);
+            else ctx.moveTo(x, y);
+            started = true;
+          });
+          ctx.stroke();
+        });
+      }
+      function roundJ(frame) {
+        return frame.cell_objective_cost
+          ? frame.cell_objective_cost.reduce((sum, value) => sum + value, 0)
+          : null;
+      }
+      function timelineText(frame) {
+        return (
+          frame.kind +
+          " · step " +
+          frame.step +
+          " · t = " +
+          frame.time +
+          " · actual excess = " +
+          frame.actual_excess +
+          " · " +
+          (frame.before_frequency
+            ? "mean pruned this round = "
+            : "pruned this round = ") +
+          frame.pruned_count +
+          (roundJ(frame) === null ? "" : " · J(S) = " + roundJ(frame)) +
+          (frame.earlier_time === null
+            ? ""
+            : " · destination t = " + frame.earlier_time)
+        );
+      }
       function drawTimeline(id = "timeline", frames = F) {
-        const ctx = prepare($(id), 240);
-        ctx.fillStyle = "#172033";
-        ctx.fillText("reverse survival s", 3, 212);
+        const costs = frames.map(roundJ),
+          hasCost = costs.some((value) => value !== null);
+        $(
+          id === "timeline" ? "timelineTitle" : "averageTimelineTitle",
+        ).textContent = hasCost
+          ? "Timeline: actual excess and round J(S)"
+          : "Timeline: timestep and actual excess";
+        const ctx = prepare($(id), hasCost ? 315 : 235);
         columns.forEach((fi, i) => {
-          const x = labelWidth + i * width,
-            f = frames[fi];
+          ctx.fillStyle = "#172033";
           ctx.save();
-          ctx.translate(x + width / 2, 178);
+          ctx.translate(labelWidth + (i + 0.5) * width, 155);
           ctx.rotate(-Math.PI / 2);
-          ctx.fillText(columnLabel(f), 0, 0);
+          ctx.fillText(columnLabel(frames[fi]), 0, 0);
           ctx.restore();
         });
-        ctx.strokeStyle = "#2563eb";
-        ctx.lineWidth = 2;
-        ctx.beginPath();
-        let started = false;
-        columns.forEach((fi, i) => {
-          const s = frames[fi].reverse_survival_ratio;
-          if (s === null) return;
-          const x = labelWidth + (i + 0.5) * width,
-            y = 225 - 35 * s;
-          if (!started) {
-            ctx.moveTo(x, y);
-            started = true;
-          } else ctx.lineTo(x, y);
-        });
-        ctx.stroke();
+        const maximum = Math.max(1, ...frames.map((f) => f.actual_excess));
+        plotLines(
+          ctx,
+          [
+            {
+              color: "#15803d",
+              label: "actual excess [0, " + probabilityText(maximum) + "]",
+              values: frames.map((f) => f.actual_excess),
+            },
+          ],
+          (i) => labelWidth + (i + 0.5) * width,
+          175,
+          45,
+          maximum,
+        );
+        if (hasCost) {
+          const range = costRange(costs);
+          plotLines(
+            ctx,
+            [
+              {
+                color: "#172033",
+                label:
+                  "round J [" +
+                  probabilityText(range.minimum) +
+                  ", " +
+                  probabilityText(range.maximum) +
+                  "]",
+                values: costs,
+              },
+            ],
+            (i) => labelWidth + (i + 0.5) * width,
+            255,
+            45,
+            range.maximum,
+            range.minimum,
+          );
+        }
       }
+      function drawBudgetRound() {
+        const frame = F[selectedColumn],
+          costs = frame.cell_objective_cost;
+        $("budgetSection").hidden = !costs;
+        if (!costs) return;
+        $("budgetSummary").textContent =
+          "This round removed " +
+          frame.removal_events.length +
+          " candidates; J(S) = " +
+          probabilityText(costs.reduce((a, b) => a + b, 0)) +
+          ".";
+        const body = $("budgetRemovals");
+        body.replaceChildren();
+        frame.removal_events.forEach((event, index) => {
+          const row = document.createElement("tr");
+          if (
+            event.cell === selected &&
+            event.removed_digit_index === selectedDigit
+          )
+            row.className = "selected";
+          [
+            index + 1,
+            cellName(event.cell),
+            event.removed_digit_index + 1,
+            event.model_probability,
+            event.incremental_cost,
+            event.objective_cost_after,
+          ].forEach((value) => {
+            const cell = document.createElement("td");
+            cell.textContent =
+              typeof value === "number" ? probabilityText(value) : value;
+            cell.title = String(value);
+            row.appendChild(cell);
+          });
+          row.onclick = () => selectCell(event.cell, event.removed_digit_index);
+          body.appendChild(row);
+        });
+        const canvas = $("budgetCellCosts");
+        canvas.width = Math.max(620, 90 + 12 * costs.length);
+        canvas.height = 210;
+        const ctx = canvas.getContext("2d");
+        ctx.clearRect(0, 0, canvas.width, 210);
+        ctx.font = "10px system-ui";
+        const range = costRange(costs),
+          zeroY =
+            145 - (120 * (0 - range.minimum)) / (range.maximum - range.minimum),
+          barWidth = (canvas.width - 70) / costs.length;
+        ctx.fillStyle = "#172033";
+        ctx.fillText(
+          "Cell J [ " +
+            probabilityText(range.minimum) +
+            ", " +
+            probabilityText(range.maximum) +
+            " ]",
+          5,
+          15,
+        );
+        ctx.strokeStyle = "#94a3b8";
+        ctx.beginPath();
+        ctx.moveTo(60, zeroY);
+        ctx.lineTo(canvas.width, zeroY);
+        ctx.stroke();
+        costs.forEach((value, cell) => {
+          const x = 60 + cell * barWidth,
+            y =
+              145 -
+              (120 * (value - range.minimum)) / (range.maximum - range.minimum);
+          ctx.fillStyle = cell === selected ? "#f59e0b" : "#2563eb";
+          ctx.fillRect(
+            x,
+            Math.min(y, zeroY),
+            Math.max(1, barWidth - 2),
+            Math.abs(y - zeroY),
+          );
+          ctx.save();
+          ctx.translate(x, 155);
+          ctx.rotate(Math.PI / 2);
+          ctx.fillText(cellName(cell), 0, 0);
+          ctx.restore();
+        });
+        canvas.onclick = (event) => {
+          const rect = canvas.getBoundingClientRect(),
+            x = ((event.clientX - rect.left) * canvas.width) / rect.width;
+          const cell = Math.floor((x - 60) / barWidth);
+          if (cell >= 0 && cell < costs.length) selectCell(cell);
+        };
+      }
+
+      function reportDataJSON() {
+        return JSON.stringify(DATA, null, 2);
+      }
+      $("downloadData").onclick = () => {
+        const url = URL.createObjectURL(
+          new Blob([reportDataJSON()], { type: "application/json" }),
+        );
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = "heatmap_report.json";
+        link.click();
+        setTimeout(() => URL.revokeObjectURL(url), 0);
+      };
       function peer(c) {
         const box = Math.sqrt(side);
         return (
@@ -1098,35 +1391,14 @@
               Math.floor((selected % side) / box))
         );
       }
-      function targetDigit(c) {
-        return $("compareTarget").value === "selected"
-          ? selectedDigit
-          : D.reference[c];
-      }
       function probabilityText(value) {
         return value === null || value === undefined
           ? "—"
           : Number(value.toPrecision(6)).toString();
       }
-      function comparisonData(fi, c) {
-        const f = F[fi],
-          d = targetDigit(c),
-          p = f.model_probability?.[c][d] ?? null,
-          next = F[fi + 1]?.model_probability?.[c][d] ?? null;
-        return {
-          cell: c,
-          target: d + 1,
-          before: digits(f.before[c]),
-          after: digits(f.after[c]),
-          removed: digits(f.before[c].map((v, i) => v && !f.after[c][i])),
-          added: digits(f.after[c].map((v, i) => v && !f.before[c][i])),
-          model_probability: p,
-          retention_probability: f.retention_probability?.[c][d] ?? null,
-          next_model_probability: next,
-          delta: p === null || next === null ? null : next - p,
-        };
-      }
+
       function drawWholeBoard() {
+        drawBudgetRound();
         const f = F[selectedColumn],
           state = f[$("stage").value === "before" ? "before" : "after"];
         $("stepSlider").value = selectedColumn;
@@ -1195,18 +1467,13 @@
               b = document.createElement("button");
             b.className = "candidate-digit";
             b.textContent = digit;
-            const p = f[$("mode").value]?.[c][d];
-            if (p !== undefined) {
-              b.style.background =
-                "rgb(" +
-                Math.round(255 - 235 * p) +
-                "," +
-                Math.round(255 - 170 * p) +
-                "," +
-                Math.round(255 - 58 * p) +
-                ")";
-              b.style.color = p > 0.65 ? "white" : "#172033";
-            }
+            const mode = $("mode").value,
+              p = valueAt(f, c, d, mode);
+            b.style.background = colorFor(p, mode, f);
+            b.style.color =
+              p !== undefined && colorFraction(p, mode, f) > 0.65
+                ? "white"
+                : "#172033";
             if (d === D.reference[c]) b.classList.add("reference");
             if (f.kind === "decode" && d === D.prediction[c])
               b.classList.add("decoded");
@@ -1218,69 +1485,30 @@
             grid.appendChild(b);
           });
           tile.appendChild(grid);
-          const delta = comparisonData(selectedColumn, c),
-            footer = document.createElement("div");
+          const removed = f.before[c].filter(
+            (value, d) => value && !f.after[c][d],
+          ).length;
+          const added = f.after[c].filter(
+            (value, d) => value && !f.before[c][d],
+          ).length;
+          const footer = document.createElement("div");
           footer.className = "cell-caption";
           footer.textContent =
             "ref " +
             (D.reference[c] + 1) +
-            (delta.removed.length ? " · −" + delta.removed.length : "") +
-            (delta.added.length ? " · +" + delta.added.length : "");
+            (removed ? " · −" + removed : "") +
+            (added ? " · +" + added : "");
           tile.appendChild(footer);
           tile.onclick = () => boardCell(c);
           root.appendChild(tile);
         });
-        $("compareScope").textContent =
-          $("compareTarget").value === "selected"
-            ? "Target: selected digit " +
-              (selectedDigit + 1) +
-              " in every cell."
-            : "Target: each cell’s own reference digit.";
-        const tbody = $("comparisonRows");
-        tbody.replaceChildren();
-        D.cells.forEach((cell) => {
-          const c = cell.cell,
-            a = comparisonData(selectedColumn, c);
-          if ($("changedOnly").checked && !a.removed.length && !a.added.length)
-            return;
-          const row = document.createElement("tr");
-          if (c === selected) row.className = "selected";
-          else if (peer(c)) row.className = "peer";
-          const values = [
-            cellName(c) + (cell.clue ? " [clue]" : ""),
-            a.target,
-            a.before.join(","),
-            a.after.join(","),
-            "-[" + a.removed.join(",") + "] / +[" + a.added.join(",") + "]",
-            probabilityText(a.model_probability),
-            probabilityText(a.retention_probability),
-            probabilityText(a.next_model_probability),
-            probabilityText(a.delta),
-          ];
-          values.forEach((value, i) => {
-            const td = document.createElement("td");
-            td.textContent = value;
-            if (i >= 5)
-              td.title = String(
-                [
-                  a.model_probability,
-                  a.retention_probability,
-                  a.next_model_probability,
-                  a.delta,
-                ][i - 5] ?? "Not applicable",
-              );
-            if (i === 8 && a.delta !== null)
-              td.className = a.delta < 0 ? "danger" : "good";
-            row.appendChild(td);
-          });
-          row.onclick = () => boardCell(c);
-          tbody.appendChild(row);
-        });
       }
       function chooseRun(index) {
+        activeTimeView = "individual";
         if (!RUNS[index]) return;
         D = { ...DATA, ...RUNS[index] };
         F = D.frames;
+        configureModes($("mode"), F);
         $("seedSelect").value = String(index);
         $("individualTrajectory").open = true;
         $("metadata").textContent = JSON.stringify(
@@ -1291,63 +1519,56 @@
         render();
         inspect(selectedColumn, selected, selectedDigit);
       }
-      function averageInspectionData(fi, c, d) {
-        const f = A.frames[fi],
-          p = f.model_probability?.[c][d] ?? null,
-          next = A.frames[fi + 1]?.model_probability?.[c][d] ?? null;
-        return {
-          cell: cellName(c),
-          digit: d + 1,
-          step: f.step,
-          time_before: f.time,
-          time_after: f.earlier_time,
-          mean_model_probability: p,
-          next_mean_model_probability: next,
-          delta_mean_model_probability:
-            p === null || next === null ? null : next - p,
-          mean_retention_probability: f.retention_probability?.[c][d] ?? null,
-          candidate_frequency_before: f.before_frequency[c][d],
-          candidate_frequency_after: f.after_frequency[c][d],
-          mean_candidate_count_before: f.before_frequency[c].reduce(
-            (a, b) => a + b,
-            0,
-          ),
-          mean_candidate_count_after: f.mean_candidate_count[c],
-          reference_survival_frequency: f.reference_survival[c],
-          singleton_frequency: f.singleton_frequency[c],
-          final_decoded_frequency: A.prediction_frequency[c][d],
-        };
+      function averageInspectionData(fi, cell, digit) {
+        const frame = A.frames[fi],
+          info = {
+            cell: cellName(cell),
+            digit: digit + 1,
+            step: frame.step,
+            time_before: frame.time,
+            time_after: frame.earlier_time,
+            actual_excess: frame.actual_excess,
+            candidate_frequency_before: frame.before_frequency[cell][digit],
+            candidate_frequency_after: frame.after_frequency[cell][digit],
+            mean_candidate_count_before: frame.before_frequency[cell].reduce(
+              (a, b) => a + b,
+              0,
+            ),
+            mean_candidate_count_after: frame.mean_candidate_count[cell],
+            reference_survival_frequency: frame.reference_survival[cell],
+            singleton_frequency: frame.singleton_frequency[cell],
+            final_decoded_frequency: A.prediction_frequency[cell][digit],
+          };
+        if (frame.model_probability)
+          info.mean_model_probability = frame.model_probability[cell][digit];
+        if (frame.retention_probability)
+          info.mean_retention_proposal =
+            frame.retention_probability[cell][digit];
+        if (frame.cell_objective_cost)
+          info.mean_cell_objective_cost = frame.cell_objective_cost[cell];
+        return info;
       }
-      function inspectAverage(fi, c, d) {
+      function inspectAverage(fi, cell, digit) {
         $("averageInspection").textContent = JSON.stringify(
-          averageInspectionData(fi, c, d),
+          averageInspectionData(fi, cell, digit),
           null,
           2,
         );
       }
-      function paintAverage(ctx, x, y, c, d, f, compact) {
-        const p = f[$("averageMode").value]?.[c][d],
-          available = f.before_frequency[c][d];
-        ctx.fillStyle =
-          p === undefined
-            ? "#e2e8f0"
-            : available === 0
-              ? "#ededed"
-              : "rgb(" +
-                Math.round(255 - 235 * p) +
-                "," +
-                Math.round(255 - 170 * p) +
-                "," +
-                Math.round(255 - 58 * p) +
-                ")";
+      function paintAverage(ctx, x, y, cell, digit, frame, compact) {
+        const mode = $("averageMode").value,
+          value = valueAt(frame, cell, digit, mode),
+          available = frame.before_frequency[cell][digit];
+        const masked = mode !== "cell_objective_cost" && available === 0;
+        ctx.fillStyle = masked ? "#ededed" : colorFor(value, mode, frame);
         ctx.fillRect(x, y, width, rowHeight);
         const bold = compact
-          ? f.singleton_frequency[c] === 1
-          : f.after_frequency[c][d] === 1;
+          ? frame.singleton_frequency[cell] === 1
+          : frame.after_frequency[cell][digit] === 1;
         ctx.strokeStyle = bold ? "#172033" : "#cbd5e1";
         ctx.lineWidth = bold ? 2 : 0.5;
         ctx.strokeRect(x + 1, y + 1, width - 2, rowHeight - 2);
-        if (available === 0 && p !== undefined) {
+        if (masked && value !== undefined) {
           ctx.strokeStyle = "#a1a1aa";
           ctx.beginPath();
           for (let i = 0; i < width + rowHeight; i += 6) {
@@ -1361,10 +1582,19 @@
         }
         if (compact && width >= 12) {
           ctx.fillStyle =
-            p !== undefined && p > 0.65 && available > 0 ? "white" : "#172033";
-          ctx.fillText(f.mean_candidate_count[c].toFixed(1), x + 2, y + 17);
+            value !== undefined &&
+            colorFraction(value, mode, frame) > 0.65 &&
+            !masked
+              ? "white"
+              : "#172033";
+          ctx.fillText(
+            frame.mean_candidate_count[cell].toFixed(1),
+            x + 2,
+            y + 17,
+          );
         }
       }
+
       function moveAverageCursors() {
         [
           "averageTimelineCursor",
@@ -1445,18 +1675,13 @@
             small.textContent =
               Math.round(value * RUNS.length) + "/" + RUNS.length;
             b.appendChild(small);
-            const p = f[$("averageMode").value]?.[c][d];
-            if (p !== undefined) {
-              b.style.background =
-                "rgb(" +
-                Math.round(255 - 235 * p) +
-                "," +
-                Math.round(255 - 170 * p) +
-                "," +
-                Math.round(255 - 58 * p) +
-                ")";
-              b.style.color = p > 0.65 ? "white" : "#172033";
-            }
+            const mode = $("averageMode").value,
+              p = valueAt(f, c, d, mode);
+            b.style.background = colorFor(p, mode, f);
+            b.style.color =
+              p !== undefined && colorFraction(p, mode, f) > 0.65
+                ? "white"
+                : "#172033";
             if (d === DATA.reference[c]) b.classList.add("reference");
             b.title =
               "Candidate frequency " +
@@ -1486,6 +1711,7 @@
       }
       function drawAverage() {
         if (!A) return;
+        updateColorNotes();
         drawTimeline("averageTimeline", A.frames);
         const cells = DATA.question.flatMap((v, c) => (v < 0 ? [c] : [])),
           ctx = prepare(
@@ -1551,13 +1777,18 @@
         drawAverageBoard();
       }
       function selectAverageTime(fi) {
+        activeTimeView = "average";
         if (!A) return;
         averageColumn = Math.max(0, Math.min(A.frames.length - 1, fi));
+        $("averageTimelineHover").textContent = timelineText(
+          A.frames[averageColumn],
+        );
         moveAverageCursors();
         drawAverageBoard();
         inspectAverage(averageColumn, selected, selectedDigit);
       }
       function selectAverageCell(c, d) {
+        activeTimeView = "average";
         selected = c;
         selectedDigit = d;
         $("averagePin").checked = true;
@@ -1566,14 +1797,11 @@
       }
       function render() {
         rows = D.cells
-          .filter((a) => ($("clues").checked || !a.clue) && matches(a.cell))
-          .map((a) => a.cell);
-        $("modeNote").textContent =
-          $("mode").value === "model_probability"
-            ? "Color is the model probability of the reference digit in the overview, or the row’s digit in the expanded view. Dark blue = high predicted probability; gray hatching = excluded by the mask."
-            : "Color is the chance that this candidate survives this one transition. Dark blue early is expected for nearly all digits because s is high; it does NOT indicate a selected answer or model confidence. Retention is undefined at initialization and decoding.";
-        if (DATA.metadata.sampler_note)
-          $("modeNote").textContent += " " + DATA.metadata.sampler_note;
+          .filter(
+            (cell) => ($("clues").checked || !cell.clue) && matches(cell.cell),
+          )
+          .map((cell) => cell.cell);
+        updateColorNotes();
         drawBoards();
         drawTimeline();
         drawOverview();
@@ -1581,8 +1809,16 @@
         moveCursors();
         drawWholeBoard();
         drawAverage();
-        if (A) inspectAverage(averageColumn, selected, selectedDigit);
+        $("timelineHover").textContent = timelineText(F[selectedColumn]);
+        if (A) {
+          $("averageTimelineHover").textContent = timelineText(
+            A.frames[averageColumn],
+          );
+          inspectAverage(averageColumn, selected, selectedDigit);
+        }
+        syncStickyOffsets();
       }
+
       function hit(canvas, event) {
         const rect = canvas.getBoundingClientRect(),
           x = ((event.clientX - rect.left) * canvas.width) / rect.width,
@@ -1625,7 +1861,7 @@
           inspect(selectedColumn, selected, selectedDigit);
         }),
       );
-      ["stage", "compareTarget", "changedOnly"].forEach((id) =>
+      ["stage"].forEach((id) =>
         $(id).addEventListener("change", () => {
           drawWholeBoard();
           inspect(selectedColumn, selected, selectedDigit);
@@ -1646,20 +1882,29 @@
         ["expandedPanel", "expandedSticky"],
         ["averageExpandedPanel", "averageSticky"],
       ];
+      function syncStickyOffsets() {
+        [
+          ["expandedPanel", "timeControls"],
+          ["averageExpandedPanel", "averageTimeControls"],
+        ].forEach(([panel, controls]) => {
+          const height = $(panel).classList.contains("is-sticky")
+            ? ($(panel).getBoundingClientRect().height ?? 0)
+            : 0;
+          $(controls).style.top = height + "px";
+        });
+      }
       function toggleSticky(panelId, buttonId) {
         const active = $(buttonId).getAttribute("aria-pressed") !== "true";
         stickyPanels.forEach(([panel, button]) => {
           const on = active && panel === panelId;
           $(panel).classList.toggle("is-sticky", on);
           $(button).setAttribute("aria-pressed", String(on));
-          $(button).setAttribute(
-            "aria-label",
-            on ? "Unpin expanded view" : "Pin expanded view",
-          );
           $(button).title = on
             ? "Unpin expanded view"
-            : "Pin expanded view while scrolling";
+            : "Pin expanded view at the top";
+          $(button).setAttribute("aria-label", $(button).title);
         });
+        syncStickyOffsets();
       }
       stickyPanels.forEach(
         ([panel, button]) =>
@@ -1668,7 +1913,8 @@
       $("seedSelect").addEventListener("change", () =>
         chooseRun(Number($("seedSelect").value)),
       );
-      $("averageMode").value = "model_probability";
+      configureModes($("mode"), F);
+      configureModes($("averageMode"), A?.frames ?? F);
       $("averageStage").value = "after_frequency";
       $("averageMode").addEventListener("change", () => {
         drawAverage();
@@ -1726,6 +1972,61 @@
           averageSyncing = false;
         }),
       );
+      [
+        ["timeline", "timelineHover", () => F, () => selectedColumn],
+        [
+          "averageTimeline",
+          "averageTimelineHover",
+          () => A?.frames,
+          () => averageColumn,
+        ],
+      ].forEach(([id, output, frames, index]) => {
+        $(id).onmousemove = (event) => {
+          const current = frames();
+          if (!current) return;
+          const fi = hit($(id), event).fi;
+          if (fi !== undefined) {
+            const text = timelineText(current[fi]);
+            $(id).title = text;
+            $(output).textContent = text;
+          } else {
+            $(id).title = "";
+            $(output).textContent = timelineText(current[index()]);
+          }
+        };
+        $(id).onmouseleave = () => {
+          const current = frames();
+          if (current) $(output).textContent = timelineText(current[index()]);
+        };
+      });
+      function handleTimeKey(event) {
+        if (
+          !["ArrowLeft", "ArrowRight"].includes(event.key) ||
+          event.ctrlKey ||
+          event.metaKey ||
+          event.altKey
+        )
+          return;
+        const target = event.target;
+        if (
+          target?.isContentEditable ||
+          ["TEXTAREA", "SELECT"].includes(target?.tagName) ||
+          (target?.tagName === "INPUT" && target.type !== "range")
+        )
+          return;
+        event.preventDefault?.();
+        const delta = event.key === "ArrowRight" ? 1 : -1;
+        if (
+          A &&
+          (target?.id === "averageSlider" ||
+            (target?.id !== "stepSlider" && activeTimeView === "average"))
+        )
+          selectAverageTime(averageColumn + delta);
+        else selectTime(selectedColumn + delta);
+      }
+      $("individualTrajectory").addEventListener("toggle", syncStickyOffsets);
+      globalThis.addEventListener?.("keydown", handleTimeKey);
+      globalThis.addEventListener?.("resize", syncStickyOffsets);
       render();
       inspect(0, selected, selectedDigit);
     </script>

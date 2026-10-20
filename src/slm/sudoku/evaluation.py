@@ -4,7 +4,7 @@ import torch
 
 from slm.common.seeds import VALIDATION_SEED
 from slm.slm.core import predict_log_probs
-from slm.slm.samplers import get_sampler
+from slm.slm.samplers import create_sampler
 
 from .data import valid_units
 from .task import blank_mean, clamp_clues, initial_candidates
@@ -16,12 +16,12 @@ def solve_sudoku(
 ):
     if steps < 1:
         raise ValueError("steps must be positive")
-    pruning = get_sampler(sampler)
     old_mode = model.training
     model.eval()
     try:
         with torch.inference_mode():
             candidates = initial_candidates(questions)
+            pruning = create_sampler(sampler, candidates, generator)
             if observer is not None:
                 observer(0, candidates)
             for index in range(steps, 0, -1):

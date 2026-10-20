@@ -17,9 +17,6 @@ class NullTracker:
     def artifact(self, name, value):
         pass
 
-    def html(self, path):
-        pass
-
     def finish(self, exit_code=0):
         pass
 
@@ -106,11 +103,6 @@ class ExperimentTracker:
     def artifact(self, name: str, value: Any) -> None:
         """Log a preconstructed chart/table; experiments supply scientific content."""
         self.run.log({name: value})
-
-    def html(self, path: str | Path) -> None:
-        """Upload the original HTML once, without a duplicate W&B media preview."""
-        path = Path(path).resolve()
-        self.run.save(str(path), base_path=str(path.parent), policy="now")
 
     def finish(self, exit_code: int = 0) -> None:
         if not self.closed:

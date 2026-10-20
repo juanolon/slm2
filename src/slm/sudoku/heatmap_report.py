@@ -15,9 +15,8 @@ from slm.common.seeds import SAMPLE_SEED
 from slm.slm.core import (
     one_hot_tokens,
     predict_log_probs,
-    survival_ratio,
 )
-from slm.slm.samplers import get_sampler
+from slm.slm.samplers import create_sampler
 
 from .data import decode_board
 from .evaluation import sudoku_scores
@@ -38,13 +37,13 @@ def solve_sudoku(
         raise ValueError("Expected one 4x4 or 9x9 question, with shape (1, cells)")
     if type(steps) is not int or steps < 1:
         raise ValueError("steps must be a positive integer")
-    pruning = get_sampler(sampler)
     old_mode = model.training
     frames = []
     model.eval()
     try:
         with torch.inference_mode():
             candidates = initial_candidates(questions)
+            pruning = create_sampler(sampler, candidates, generator)
             initial = candidates[0].cpu().tolist()
             frames.append(
                 {
@@ -52,14 +51,11 @@ def solve_sudoku(
                     "step": 0,
                     "time": 1.0,
                     "earlier_time": None,
-                    "reverse_survival_ratio": None,
+                    "actual_excess": int((candidates.sum(-1) - 1).sum()),
+                    "pruned_count": 0,
                     "before": initial,
-                    "sampled": initial,
-                    "repaired": initial,
                     "after": initial,
                     "model_probability": None,
-                    "retention_probability": None,
-                    "draws": None,
                 }
             )
             for index in range(steps, 0, -1):
@@ -71,6 +67,7 @@ def solve_sudoku(
                 )
                 earlier = torch.full_like(time, (index - 1) / steps)
 
+                before = candidates
                 candidates, frame = pruning(
                     model, candidates, earlier, time, generator, record=True
                 )
@@ -80,9 +77,8 @@ def solve_sudoku(
                     step=steps - index + 1,
                     time=time.item(),
                     earlier_time=earlier.item(),
-                    reverse_survival_ratio=survival_ratio(
-                        earlier, time, candidates.shape[-1]
-                    ).item(),
+                    actual_excess=int((candidates.sum(-1) - 1).sum()),
+                    pruned_count=int((before & ~candidates).sum()),
                     after=candidates[0].cpu().tolist(),
                 )
                 frames.append(frame)
@@ -98,14 +94,11 @@ def solve_sudoku(
                     "step": steps + 1,
                     "time": 0.0,
                     "earlier_time": None,
-                    "reverse_survival_ratio": None,
+                    "actual_excess": int((candidates.sum(-1) - 1).sum()),
+                    "pruned_count": 0,
                     "before": final_mask,
-                    "sampled": final_mask,
-                    "repaired": final_mask,
                     "after": final_mask,
                     "model_probability": log_probs.double().exp()[0].cpu().tolist(),
-                    "retention_probability": None,
-                    "draws": None,
                 }
             )
     finally:
@@ -150,10 +143,18 @@ def average_trajectories(runs, question, reference):
                 "step",
                 "time",
                 "earlier_time",
-                "reverse_survival_ratio",
             )
         }
-        for field in ("model_probability", "retention_probability"):
+        for field in ("actual_excess", "pruned_count"):
+            frame[field] = sum(sample[field] for sample in samples) / len(samples)
+        # Average only values with a visible color mode or inspection field.
+        for field in (
+            "model_probability",
+            "retention_probability",
+            "cell_objective_cost",
+        ):
+            if field not in template:
+                continue
             frame[field] = (
                 torch.tensor([sample[field] for sample in samples], dtype=torch.float64)
                 .mean(0)
@@ -254,6 +255,7 @@ class HeatmapReport(Report):
             "sampling_steps": steps,
         }
         payload = {
+            "config": vars(args.config),
             "metadata": metadata,
             "question": q,
             "reference": ref,
@@ -275,7 +277,6 @@ class HeatmapReport(Report):
         html_path = report_path / "heatmap_report.html"
         try:
             write_html(html_path, payload)
-            tracker.html(html_path)
             tracker.log(
                 completed,
                 {f"report/heatmap/{key}": value for key, value in scores.items()},

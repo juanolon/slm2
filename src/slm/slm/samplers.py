@@ -5,10 +5,12 @@ SAMPLERS = {
     "protected": "protected_prune_step",
     "confidence-gated": "confidence_gated_prune_step",
     "topk": "topk_prune_step",
+    "budgeted": "BudgetedPruner",
 }
 
 
-def get_sampler(name="default"):
+def create_sampler(name, candidate_mask, generator=None):
+
     try:
         function = SAMPLERS[name]
     except KeyError:
@@ -18,4 +20,5 @@ def get_sampler(name="default"):
     # Keep CLI argument parsing independent of torch.
     from . import sampling
 
-    return getattr(sampling, function)
+    sampler = getattr(sampling, function)
+    return sampler(candidate_mask, generator) if isinstance(sampler, type) else sampler
