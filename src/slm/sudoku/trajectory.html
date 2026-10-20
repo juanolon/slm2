@@ -233,6 +233,10 @@
       tr.selected {
         background: #fff0c2;
       }
+      tr.selected-digit {
+        box-shadow: inset 3px 0 #2563eb;
+        font-weight: 600;
+      }
       tr.peer {
         background: #f3e8ff;
       }
@@ -459,9 +463,11 @@
         <h2 id="timelineTitle">Timeline: timestep and actual excess</h2>
         <p>
           Actual excess is the number of surviving candidates above one per
-          cell. Budgeted runs also show the round's total J(S) on a separate
-          scale. Hover a column for exact values and how many candidates were
-          pruned after repair/protection; click to select that round.
+          cell. The scheduled expected_count is n(s) = Kˢ at the destination
+          time s: candidates per initially unresolved cell, not the board's
+          actual mean count. Budgeted runs also show round J(S). Each curve has
+          its own scale. Hover for exact values and actual candidates pruned
+          after repair/protection; click to select that round.
         </p>
         <div id="timelineScroll" class="scroll">
           <canvas id="timeline"></canvas>
@@ -474,16 +480,22 @@
         <p id="budgetSummary"></p>
         <h3>Each cell's contribution to J(S)</h3>
         <p>
-          After this round, each bar is Jᵢ = −log Rᵢ: the model mass discarded
-          in that cell. Bars sum to this round's J(S), not a cumulative run
-          loss. Click a bar to select its cell.
+          Each bar is the cell's cost Jᵢ = −log Rᵢ, where Rᵢ is the model
+          probability mass retained after this round. Their sum equals the
+          timeline's J(S) for this seed and round. J starts at zero at each
+          model call and increases as candidates are removed; it is not an
+          amount reduced or a cumulative run loss. Click a bar to select its
+          cell and highlight all its recorded removals.
         </p>
         <div class="scroll"><canvas id="budgetCellCosts"></canvas></div>
         <h3>Recorded removals</h3>
         <p>
           The actual removals in this round. p is frozen at the model call; ΔJ
-          is the cost of that removal, and J is the board cost after it. Click a
-          row to inspect that cell and digit.
+          is the added cost of that removal, and J is the board cost after it.
+          The first removal minimizes ΔJ among eligible candidates, not the
+          final cell costs in the bars above. Yellow rows belong to the selected
+          cell; the blue accent marks the selected digit. Click a row to inspect
+          that cell and digit.
         </p>
         <div class="table-scroll">
           <table>
@@ -1141,6 +1153,9 @@
         $("expandedTitle").textContent =
           "Expanded " +
           cellName(selected) +
+          ($("mode").value === "cell_objective_cost"
+            ? " — cell J shared across digits"
+            : "") +
           " — reference digit " +
           (D.reference[selected] + 1);
         for (let d = 0; d < side; d++) {
@@ -1213,6 +1228,8 @@
           frame.time +
           " · actual excess = " +
           frame.actual_excess +
+          " · expected_count(after) = " +
+          frame.expected_count +
           " · " +
           (frame.before_frequency
             ? "mean pruned this round = "
@@ -1230,9 +1247,9 @@
         $(
           id === "timeline" ? "timelineTitle" : "averageTimelineTitle",
         ).textContent = hasCost
-          ? "Timeline: actual excess and round J(S)"
-          : "Timeline: timestep and actual excess";
-        const ctx = prepare($(id), hasCost ? 315 : 235);
+          ? "Timeline: actual excess, expected count and round J(S)"
+          : "Timeline: actual excess and expected count";
+        const ctx = prepare($(id), hasCost ? 395 : 315);
         columns.forEach((fi, i) => {
           ctx.fillStyle = "#172033";
           ctx.save();
@@ -1256,6 +1273,21 @@
           45,
           maximum,
         );
+        plotLines(
+          ctx,
+          [
+            {
+              color: "#7c3aed",
+              label: "expected count [1, " + side + "]",
+              values: frames.map((frame) => frame.expected_count),
+            },
+          ],
+          (i) => labelWidth + (i + 0.5) * width,
+          255,
+          45,
+          side,
+          1,
+        );
         if (hasCost) {
           const range = costRange(costs);
           plotLines(
@@ -1273,7 +1305,7 @@
               },
             ],
             (i) => labelWidth + (i + 0.5) * width,
-            255,
+            335,
             45,
             range.maximum,
             range.minimum,
@@ -1295,11 +1327,11 @@
         body.replaceChildren();
         frame.removal_events.forEach((event, index) => {
           const row = document.createElement("tr");
-          if (
-            event.cell === selected &&
-            event.removed_digit_index === selectedDigit
-          )
-            row.className = "selected";
+          if (event.cell === selected) {
+            row.classList.add("selected");
+            if (event.removed_digit_index === selectedDigit)
+              row.classList.add("selected-digit");
+          }
           [
             index + 1,
             cellName(event.cell),
@@ -1743,7 +1775,9 @@
         });
         const expanded = prepare($("averageExpanded"), side * rowHeight);
         $("averageExpandedTitle").textContent =
-          "Mean candidate probabilities: " + cellName(selected);
+          ($("averageMode").value === "cell_objective_cost"
+            ? "Mean cell J (shared across digits): "
+            : "Mean candidate probabilities: ") + cellName(selected);
         for (let d = 0; d < side; d++) {
           const y = d * rowHeight;
           expanded.fillStyle =

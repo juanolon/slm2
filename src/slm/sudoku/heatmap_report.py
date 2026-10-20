@@ -13,6 +13,7 @@ from slm.common.contracts import Report
 from slm.common.reporting import mean_scores, sampling_settings
 from slm.common.seeds import SAMPLE_SEED
 from slm.slm.core import (
+    expected_count,
     one_hot_tokens,
     predict_log_probs,
 )
@@ -53,6 +54,7 @@ def solve_sudoku(
                     "earlier_time": None,
                     "actual_excess": int((candidates.sum(-1) - 1).sum()),
                     "pruned_count": 0,
+                    "expected_count": float(candidates.shape[-1]),
                     "before": initial,
                     "after": initial,
                     "model_probability": None,
@@ -79,6 +81,7 @@ def solve_sudoku(
                     earlier_time=earlier.item(),
                     actual_excess=int((candidates.sum(-1) - 1).sum()),
                     pruned_count=int((before & ~candidates).sum()),
+                    expected_count=expected_count(earlier, candidates.shape[-1]).item(),
                     after=candidates[0].cpu().tolist(),
                 )
                 frames.append(frame)
@@ -96,6 +99,7 @@ def solve_sudoku(
                     "earlier_time": None,
                     "actual_excess": int((candidates.sum(-1) - 1).sum()),
                     "pruned_count": 0,
+                    "expected_count": 1.0,
                     "before": final_mask,
                     "after": final_mask,
                     "model_probability": log_probs.double().exp()[0].cpu().tolist(),
@@ -143,6 +147,7 @@ def average_trajectories(runs, question, reference):
                 "step",
                 "time",
                 "earlier_time",
+                "expected_count",
             )
         }
         for field in ("actual_excess", "pruned_count"):
