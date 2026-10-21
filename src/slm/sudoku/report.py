@@ -9,14 +9,22 @@ from typing import Any
 from uuid import uuid4
 
 import torch
+from tqdm.auto import tqdm
 
 from slm.common.checkpoint import CheckpointManager, load_checkpoint
 from slm.common.contracts import Report
-from slm.common.reporting import mean_scores, phase_seeds, sampling_settings
+from slm.common.reporting import (
+    log_seed_distribution,
+    mean_scores,
+    phase_seeds,
+    sampling_settings,
+    score_statistics,
+)
 from slm.common.seeds import SAMPLE_SEED, TEST_SEED
 from slm.common.tracking import ExperimentTracker
 from slm.slm.backbone import BFN_DIT
 
+from .board_scores import board_score_files, write_board_scores
 from .data import data_fingerprint, decode_board, load_sudoku
 from .evaluation import evaluate_sudoku, solve_sudoku, sudoku_scores
 
@@ -47,19 +55,30 @@ class DefaultReport(Report):
             }
         )
         device = torch.device(args.device)
-        by_seed = [
-            {
-                "seed": seed,
-                "scores": evaluate_sudoku(
-                    model, test, evaluation_config, device, seed=seed
-                ),
-            }
-            for seed in sampling["sampling_seed_list"]
-        ]
+        by_seed, board_runs = [], []
+        seeds = sampling["sampling_seed_list"]
+        for seed in tqdm(
+            seeds, desc="Sudoku evaluation seeds", unit="seed", disable=len(seeds) < 2
+        ):
+            per_board = {}
+            scores = evaluate_sudoku(
+                model,
+                test,
+                evaluation_config,
+                device,
+                seed=seed,
+                per_board=per_board,
+                progress=True,
+            )
+            by_seed.append({"seed": seed, "scores": scores})
+            board_runs.append(per_board)
         scores = mean_scores([run["scores"] for run in by_seed])
         sample_seeds = phase_seeds(args, sampling, SAMPLE_SEED)
         report = {
             "scores": scores,
+            "score_statistics": score_statistics([run["scores"] for run in by_seed]),
+            "board_scores": board_score_files(),
+            "board_id_scope": "zero-based selected test-split index (same as heatmap --board-id)",
             "boards": len(test["questions"]),
             "seed": sampling["sampling_seed"],
             **sampling,
@@ -82,10 +101,21 @@ class DefaultReport(Report):
             )
             for key, value in scores.items():
                 tracker.run.summary[f"test/{key}"] = value
+            log_seed_distribution(
+                tracker, "report/test", seeds, [run["scores"] for run in by_seed]
+            )
+            write_board_scores(
+                report_path, args.run_dir, test, seeds, board_runs, steps, tracker
+            )
             count = min(4, config.microbatch, len(test["questions"]))
             questions = test["questions"][:count].to(device)
             samples = []
-            for seed in sample_seeds:
+            for seed in tqdm(
+                sample_seeds,
+                desc="Sudoku sample seeds",
+                unit="seed",
+                disable=len(sample_seeds) < 2,
+            ):
                 predictions = solve_sudoku(
                     model,
                     questions,
@@ -134,6 +164,7 @@ class SweepReport(Report):
             args
         )
         run_path = Path(args.run_dir)
+        board_runs = {}
         results = evaluate_report(
             model,
             test,
@@ -142,10 +173,14 @@ class SweepReport(Report):
             budgets=REPORT_STEPS,
             seeds=sampling["sampling_seed_list"],
             sampler=sampling["sampler"],
+            per_board=board_runs,
         )
+        for budget, result in results.items():
+            result["board_scores"] = board_score_files(f"_steps_{budget}")
         report = {
             "by_steps": results,
             "boards": len(test["questions"]),
+            "board_id_scope": "zero-based selected test-split index (same as heatmap --board-id)",
             "seed": sampling["sampling_seed"],
             **sampling,
             "sampling_budgets": list(REPORT_STEPS),
@@ -162,6 +197,17 @@ class SweepReport(Report):
         )
         try:
             log_report(tracker, completed, results)
+            for budget, runs in board_runs.items():
+                write_board_scores(
+                    report_path,
+                    run_path,
+                    test,
+                    sampling["sampling_seed_list"],
+                    runs,
+                    int(budget),
+                    tracker,
+                    suffix=f"_steps_{budget}",
+                )
             samples = {steps: result["samples"] for steps, result in results.items()}
             (run_path / "sudoku_samples.json").write_text(json.dumps(samples, indent=2))
             (report_path / "sudoku_samples.json").write_text(
@@ -258,22 +304,30 @@ def evaluate_report(
     *,
     seeds=None,
     sampler="default",
+    per_board=None,
 ):
     seeds = [TEST_SEED] if seeds is None else list(seeds)
     if not seeds:
         raise ValueError("At least one sampling seed is required")
-    runs = [
-        _evaluate_report(
-            model,
-            split,
-            config,
-            device,
-            budgets,
-            seed,
-            sampler=sampler,
-        )
-        for seed in seeds
-    ]
+    budgets = tuple(budgets)
+    total = len(seeds) * len(budgets) * len(split["questions"])
+    with tqdm(
+        total=total, desc="Sudoku sweep", unit="board", disable=total < 2
+    ) as progress:
+        runs = [
+            _evaluate_report(
+                model,
+                split,
+                config,
+                device,
+                budgets,
+                seed,
+                sampler=sampler,
+                per_board=per_board,
+                progress=progress,
+            )
+            for seed in seeds
+        ]
     sampling_seeds = len(seeds)
     if sampling_seeds == 1:
         return runs[0]
@@ -298,6 +352,13 @@ def evaluate_report(
             }
         results[budget] = {
             "groups": groups,
+            "by_seed": [
+                {"seed": seed, "scores": run[budget]["groups"]["all"]["scores"]}
+                for seed, run in zip(seeds, runs)
+            ],
+            "score_statistics": score_statistics(
+                [run[budget]["groups"]["all"]["scores"] for run in runs]
+            ),
             "samples": [
                 [seeds[index], *sample]
                 for index, run in enumerate(runs)
@@ -316,6 +377,8 @@ def _evaluate_report(
     seed,
     *,
     sampler="default",
+    per_board=None,
+    progress=None,
 ):
     count = len(split["questions"])
     if count < 1:
@@ -323,6 +386,9 @@ def _evaluate_report(
     ratings = sorted(split["ratings"].unique().tolist())
     result = {}
     for steps in budgets:
+        if progress is not None:
+            progress.set_postfix(seed=seed, steps=steps)
+        board_scores = {}
         generator = torch.Generator(device=device).manual_seed(seed)
         groups = {
             "all": {"boards": count},
@@ -371,6 +437,15 @@ def _evaluate_report(
                     predictions, questions, answers
                 ).items()
             }
+            if per_board is not None:
+                for metric, values in scores.items():
+                    if metric not in board_scores:
+                        board_scores[metric] = torch.empty(
+                            count, dtype=values.dtype, device="cpu"
+                        )
+                    board_scores[metric][start:stop] = values
+            if progress is not None:
+                progress.update(stop - start)
             survivors = survivors.cpu()
             intact = for_boards.cpu()
             new_boards = torch.zeros_like(intact)
@@ -423,7 +498,9 @@ def _evaluate_report(
                 else [1.0] * (steps + 1),
             }
         result[str(steps)] = {"groups": groups, "samples": samples}
-        print(
+        if per_board is not None:
+            per_board.setdefault(str(steps), []).append(board_scores)
+        tqdm.write(
             json.dumps(
                 {
                     "sampling_steps": steps,
@@ -434,7 +511,6 @@ def _evaluate_report(
                     },
                 }
             ),
-            flush=True,
         )
     return result
 
@@ -445,6 +521,13 @@ def log_report(tracker, completed, results):
     ratings = list(next(iter(results.values()))["groups"])
     budgets = [int(key) for key in results]
     for steps, result in results.items():
+        if "by_seed" in result:
+            log_seed_distribution(
+                tracker,
+                f"report/steps_{steps}/all",
+                [run["seed"] for run in result["by_seed"]],
+                [run["scores"] for run in result["by_seed"]],
+            )
         metrics = {}
         for rating, group in result["groups"].items():
             prefix = "all" if rating == "all" else f"rating_{rating}"

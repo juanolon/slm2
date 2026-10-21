@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from secrets import SystemRandom
+from statistics import stdev
 
 
 def generate_seeds(count):
@@ -51,3 +52,61 @@ def phase_seeds(args, sampling, default_seed):
 
 def mean_scores(scores):
     return {key: sum(score[key] for score in scores) / len(scores) for key in scores[0]}
+
+
+def score_statistics(scores):
+    result = {}
+    for key in scores[0]:
+        values = [score[key] for score in scores]
+        result[key] = {
+            "mean": sum(values) / len(values),
+            "std": stdev(values) if len(values) > 1 else 0.0,
+            "min": min(values),
+            "max": max(values),
+        }
+    return result
+
+
+def log_seed_distribution(tracker, name, seeds, scores):
+    """Each point is one complete evaluation, not one board or an MC draw."""
+    if len(seeds) < 2:
+        return
+    import plotly.graph_objects as go
+    import wandb
+
+    metrics = list(scores[0])
+    for metric in metrics:
+        figure = go.Figure()
+        figure.add_trace(
+            go.Box(
+                name=metric,
+                y=[score[metric] for score in scores],
+                text=[f"seed {seed}" for seed in seeds],
+                boxpoints="all",
+                boxmean=True,
+                jitter=0.25,
+                pointpos=0,
+                hoverinfo="y+text+name",
+            )
+        )
+        figure.update_layout(
+            title=f"{name}: {metric} across {len(seeds)} seeds"
+            "<br><sup>Box: middle 50% · solid: median · dashed: mean · dots: seeds</sup>",
+            yaxis_title="per-seed evaluation score",
+            showlegend=False,
+        )
+        tracker.artifact(f"{name}/{metric}_seed_distribution", wandb.Plotly(figure))
+    tracker.artifact(
+        f"{name}/by_seed",
+        wandb.Table(
+            columns=["seed", *metrics],
+            data=[
+                [seed, *[score[metric] for metric in metrics]]
+                for seed, score in zip(seeds, scores)
+            ],
+        ),
+    )
+    tracker.run.summary[f"{name}/seed_count"] = len(seeds)
+    for metric, statistics in score_statistics(scores).items():
+        for statistic, value in statistics.items():
+            tracker.run.summary[f"{name}/{metric}_{statistic}"] = value

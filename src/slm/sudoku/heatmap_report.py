@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import torch
+from tqdm.auto import tqdm
 
 from slm.common.contracts import Report
 from slm.common.reporting import mean_scores, sampling_settings
@@ -220,7 +221,9 @@ class HeatmapReport(Report):
         device_question = question.to(args.device)
         seeds = sampling["sampling_seed_list"]
         runs = []
-        for sampling_seed in seeds:
+        for sampling_seed in tqdm(
+            seeds, desc="Heatmap seeds", unit="seed", disable=len(seeds) < 2
+        ):
             generator = torch.Generator(device=device_question.device).manual_seed(
                 sampling_seed
             )

@@ -8,10 +8,16 @@ from typing import Any
 from uuid import uuid4
 
 import torch
+from tqdm.auto import tqdm
 
 from slm.common.checkpoint import CheckpointManager, load_checkpoint
 from slm.common.contracts import Report
-from slm.common.reporting import phase_seeds, sampling_settings
+from slm.common.reporting import (
+    log_seed_distribution,
+    phase_seeds,
+    sampling_settings,
+    score_statistics,
+)
 from slm.common.seeds import SAMPLE_SEED, TEST_SEED, VALIDATION_SEED
 from slm.common.tracking import ExperimentTracker
 from slm.slm.backbone import BFN_DIT
@@ -68,34 +74,46 @@ class DefaultReport(Report):
         tracking = json.loads((run_path / "manifest.json").read_text())["wandb"]
         draws, windows = settings["draws"], settings["windows"]
 
-        by_seed = [
-            {
-                "seed": seed,
-                "validation_seed": validation_seed,
-                "validation": evaluate_stream(
-                    model,
-                    valid,
-                    config,
-                    windows or len(valid) // config.length,
-                    draws,
-                    seed=validation_seed,
-                ),
-                "test": evaluate_stream(
-                    model,
-                    test,
-                    config,
-                    windows or len(test) // config.length,
-                    draws,
-                    seed=seed,
-                ),
-            }
-            for seed, validation_seed in zip(
-                sampling["sampling_seed_list"], validation_seeds
+        by_seed = []
+        seeds = sampling["sampling_seed_list"]
+        for seed, validation_seed in tqdm(
+            list(zip(seeds, validation_seeds)),
+            desc="Text8 evaluation seeds",
+            unit="seed",
+            disable=len(seeds) < 2,
+        ):
+            by_seed.append(
+                {
+                    "seed": seed,
+                    "validation_seed": validation_seed,
+                    "validation": evaluate_stream(
+                        model,
+                        valid,
+                        config,
+                        windows or len(valid) // config.length,
+                        draws,
+                        seed=validation_seed,
+                        progress=True,
+                    ),
+                    "test": evaluate_stream(
+                        model,
+                        test,
+                        config,
+                        windows or len(test) // config.length,
+                        draws,
+                        seed=seed,
+                        progress=True,
+                    ),
+                }
             )
-        ]
         validation = average_evaluations([run["validation"] for run in by_seed])
         testing = average_evaluations([run["test"] for run in by_seed])
+        seed_scores = [
+            {"test_bpc": run["test"]["bpc"], "validation_bpc": run["validation"]["bpc"]}
+            for run in by_seed
+        ]
         report = {
+            "score_statistics": score_statistics(seed_scores),
             "checkpoint_step": completed,
             **sampling,
             "validation_seed_list": validation_seeds,
@@ -117,7 +135,8 @@ class DefaultReport(Report):
             vars(args.config),
             name=args.name or tracking.get("name") or config.objective,
             mode=args.wandb_mode or tracking["mode"],
-            project=getattr(args.config, "project", None) or f"{args.project or tracking['project']}-report",
+            project=getattr(args.config, "project", None)
+            or f"{args.project or tracking['project']}-report",
             entity=args.entity if args.entity is not None else tracking.get("entity"),
             resume=False,
         )
@@ -133,8 +152,14 @@ class DefaultReport(Report):
             tracker.run.summary["final_test_bpc"] = testing["bpc"]
             tracker.run.summary["final_test_mc_se"] = testing["mc_se"]
             tracker.run.summary["selected_checkpoint_step"] = completed
+            log_seed_distribution(tracker, "report/bpc", seeds, seed_scores)
             texts, sample_rows = [], []
-            for seed in sample_seeds:
+            for seed in tqdm(
+                sample_seeds,
+                desc="Text8 sample seeds",
+                unit="seed",
+                disable=len(sample_seeds) < 2,
+            ):
                 seed_all(seed)
                 tokens = generate(
                     model,

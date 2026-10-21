@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import torch
+from tqdm.auto import tqdm
 
 from slm.common.seeds import VALIDATION_SEED
 from slm.slm.core import predict_log_probs
@@ -11,7 +12,12 @@ from .task import blank_mean, clamp_clues, initial_candidates
 
 
 def solve_sudoku(
-    model, questions, steps, generator=None, observer=None, *,
+    model,
+    questions,
+    steps,
+    generator=None,
+    observer=None,
+    *,
     sampler="default",
 ):
     if steps < 1:
@@ -68,7 +74,17 @@ def sudoku_scores(predictions, questions, answers):
     }
 
 
-def evaluate_sudoku(model, split, config, device, limit=None, seed=VALIDATION_SEED):
+def evaluate_sudoku(
+    model,
+    split,
+    config,
+    device,
+    limit=None,
+    seed=VALIDATION_SEED,
+    *,
+    per_board=None,
+    progress=False,
+):
     count = (
         len(split["questions"])
         if limit is None
@@ -78,19 +94,33 @@ def evaluate_sudoku(model, split, config, device, limit=None, seed=VALIDATION_SE
         raise ValueError("No evaluation boards")
     generator = torch.Generator(device=device).manual_seed(seed)
     totals = {}
-    for start in range(0, count, config.microbatch):
-        questions = split["questions"][
-            start : min(start + config.microbatch, count)
-        ].to(device)
-        answers = split["answers"][start : min(start + config.microbatch, count)].to(
-            device
-        )
-        predictions = solve_sudoku(
-            model, questions, config.sample_steps, generator,
-            sampler=getattr(config, "sampler", "default"),
-        )
-        for key, values in sudoku_scores(predictions, questions, answers).items():
-            totals[key] = totals.get(key, 0.0) + values.sum().item()
+    with tqdm(
+        total=count,
+        desc=f"Test boards (seed {seed})",
+        unit="board",
+        disable=not progress or count < 2,
+        leave=False,
+    ) as progress_bar:
+        for start in range(0, count, config.microbatch):
+            stop = min(start + config.microbatch, count)
+            questions = split["questions"][start:stop].to(device)
+            answers = split["answers"][start:stop].to(device)
+            predictions = solve_sudoku(
+                model,
+                questions,
+                config.sample_steps,
+                generator,
+                sampler=getattr(config, "sampler", "default"),
+            )
+            for key, values in sudoku_scores(predictions, questions, answers).items():
+                totals[key] = totals.get(key, 0.0) + values.sum().item()
+                if per_board is not None:
+                    if key not in per_board:
+                        per_board[key] = torch.empty(
+                            count, dtype=values.dtype, device="cpu"
+                        )
+                    per_board[key][start:stop] = values.cpu()
+            progress_bar.update(len(questions))
     return {key: value / count for key, value in totals.items()}
 
 

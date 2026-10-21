@@ -4,6 +4,7 @@ import math
 
 import numpy as np
 import torch
+from tqdm.auto import tqdm
 
 from slm.common.seeds import VALIDATION_SEED
 from slm.slm.core import (
@@ -35,7 +36,9 @@ def estimate_bpc(model, clean_tokens, config):
         model.train(old)
 
 
-def evaluate_stream(model, ids, config, windows, draws, seed=VALIDATION_SEED):
+def evaluate_stream(
+    model, ids, config, windows, draws, seed=VALIDATION_SEED, *, progress=False
+):
     assert windows > 0 and draws > 0 and len(ids) >= config.length
     device = next(model.parameters()).device
     generator = torch.Generator().manual_seed(seed)
@@ -47,7 +50,16 @@ def evaluate_stream(model, ids, config, windows, draws, seed=VALIDATION_SEED):
         list(range(torch.cuda.device_count())) if torch.cuda.is_available() else []
     )
 
-    with torch.random.fork_rng(devices=devices):
+    with (
+        torch.random.fork_rng(devices=devices),
+        tqdm(
+            total=windows * draws,
+            desc=f"Text8 windows (seed {seed})",
+            unit="window",
+            disable=not progress or windows * draws < 2,
+            leave=False,
+        ) as progress_bar,
+    ):
         for draw in range(draws):
             torch.manual_seed(seed + 100 + draw)
             if device.type == "cuda":
@@ -64,6 +76,7 @@ def evaluate_stream(model, ids, config, windows, draws, seed=VALIDATION_SEED):
                 )
                 total += bpc.sum().item()
                 seen += len(inputs)
+                progress_bar.update(len(inputs))
             scores.append(total / seen)
     score_array = np.asarray(scores, dtype=np.float64)
     return {

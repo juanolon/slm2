@@ -10,6 +10,7 @@ dependencies = [
     "wandb>=0.19",
     "pyyaml>=6.0",
     "huggingface-hub>=0.30",
+    "plotly>=6.0",
 ]
 
 [project.scripts]
