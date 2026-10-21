@@ -25,10 +25,17 @@ from slm.common.tracking import ExperimentTracker
 from slm.slm.backbone import BFN_DIT
 
 from .board_scores import board_score_files, write_board_scores
-from .data import data_fingerprint, decode_board, load_sudoku
+from .data import data_fingerprint, decode_board, load_sudoku, load_sudoku_test
 from .evaluation import evaluate_sudoku, solve_sudoku, sudoku_scores
 
 REPORT_STEPS = (32, 64, 128, 256, 512, 1000)
+REPORT_OVERRIDE_FIELDS = (
+    "max_rating",
+    "max_test_split",
+    "sample_steps",
+    "microbatch",
+    "validation_boards",
+)
 
 
 class DefaultReport(Report):
@@ -245,6 +252,7 @@ def _load_report(args: Namespace, weights="ema"):
         completed = state["next_step"]
         checkpoint_fingerprint = state["fingerprint"]
         data, metadata = load_sudoku(config, args.data_dir)
+        test = data["test"]
         if checkpoint_fingerprint != metadata["fingerprint"]:
             warnings.warn(
                 "Legacy checkpoint dataset differs from the current selection; reporting on the current dataset"
@@ -259,21 +267,29 @@ def _load_report(args: Namespace, weights="ema"):
         model_weights = state["ema"]["model"] if weights == "ema" else state["model"]
         completed = state["progress"]["completed_updates"]
         checkpoint_fingerprint = state["data_fingerprint"]
+
         validation_config = SimpleNamespace(
-            **{**vars(config), "max_test_split": state["config"]["max_test_split"]}
+            **{
+                **vars(config),
+                **{key: state["config"][key] for key in REPORT_OVERRIDE_FIELDS},
+            }
         )
-        data, metadata = load_sudoku(validation_config, args.data_dir)
+        data, metadata = load_sudoku(SimpleNamespace(**state["config"]), args.data_dir)
         CheckpointManager(
             run_path, vars(validation_config), metadata["fingerprint"]
         ).validate(state)
-        if config.max_test_split != validation_config.max_test_split:
-            del data
-            data, metadata = load_sudoku(config, args.data_dir)
+        test = data["test"]
+        del data
+        if any(
+            getattr(config, key) != getattr(validation_config, key)
+            for key in ("max_rating", "max_test_split")
+        ):
+            test = load_sudoku_test(config, args.data_dir)
         tracking = json.loads(manifest_path.read_text())["wandb"]
 
     model = BFN_DIT(config).to(device).eval()
     model.load_state_dict(model_weights)
-    return config, model, data["test"], completed, checkpoint_fingerprint, tracking
+    return config, model, test, completed, checkpoint_fingerprint, tracking
 
 
 def _start_report(args, config, report, tracking):

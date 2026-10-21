@@ -90,9 +90,19 @@ class CheckpointManager:
         saved_max_steps = saved.pop("max_steps")
         requested_max_steps = current.pop("max_steps")
         if requested_max_steps < saved_max_steps:
-            raise ValueError("Checkpoint configuration differs: max_steps may only be increased")
+            raise ValueError(
+                "Checkpoint configuration differs: max_steps may only be increased"
+            )
         if saved != current:
-            raise ValueError("Checkpoint configuration differs; start a new run")
+            changed = sorted(
+                key
+                for key in saved.keys() | current.keys()
+                if key not in saved or key not in current or saved[key] != current[key]
+            )
+            raise ValueError(
+                f"Checkpoint configuration differs: {', '.join(changed)}; "
+                "restore the training settings or start a new run"
+            )
         if state["data_fingerprint"] != self.fingerprint:
             raise ValueError("Checkpoint dataset fingerprint differs")
 

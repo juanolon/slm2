@@ -100,6 +100,21 @@ def load_sudoku(config, data_dir="data"):
     raise ValueError(f"Unknown sudoku dataset: {config.dataset}")
 
 
+def load_sudoku_test(config, data_dir="data"):
+    """Select report boards without rebuilding training splits under a new rating filter."""
+    if config.dataset == "sudoku9x9":
+        _, test_path = fetch_csvs(data_dir)
+        return pack_rows(
+            list(
+                islice(
+                    eligible_rows(test_path, config.max_rating),
+                    config.max_test_split,
+                )
+            )
+        )
+    return load_sudoku(config, data_dir)[0]["test"]
+
+
 def load_sudoku9x9(config, data_dir="data"):
     train_path, test_path = fetch_csvs(data_dir)
     # Preserve CSV order after rating filtering, just like a fixed stream split.
